@@ -1,0 +1,274 @@
+# DRX ENGINE - PROJECT STRUCTURE
+
+## 📁 Complete Directory Layout
+
+```
+drx-engine-master/
+│
+├── 📄 README.md                      # Main project readme
+├── 📄 DRX_ENGINE_WHITEPAPER.md       # Complete technical specification
+├── 📄 QUICKSTART.md                  # Quick start guide
+├── 📄 LICENSE                        # MIT License
+├── 📄 .gitignore                     # Git ignore rules
+├── 📄 CMakeLists.txt                 # Root build configuration
+├── 🔧 build.sh                       # Build script
+│
+├── 📂 Engine/                        # Core engine (C++17)
+│   ├── CMakeLists.txt
+│   ├── Source/
+│   │   ├── Core/                     # Core systems
+│   │   │   ├── Public/
+│   │   │   │   ├── CoreTypes.h       # Fundamental types
+│   │   │   │   ├── Platform.h        # Platform abstraction
+│   │   │   │   ├── Memory.h          # Memory management
+│   │   │   │   ├── Assert.h          # Assertions
+│   │   │   │   ├── Log.h             # Logging system
+│   │   │   │   └── Math/             # Math library
+│   │   │   │       ├── Vector2.h
+│   │   │   │       ├── Vector3.h     # 3D vector math
+│   │   │   │       ├── Vector4.h
+│   │   │   │       ├── Matrix4.h
+│   │   │   │       ├── Quaternion.h
+│   │   │   │       └── Transform.h
+│   │   │   └── Private/
+│   │   │       ├── Platform_Windows.cpp
+│   │   │       ├── Platform_Linux.cpp
+│   │   │       ├── Platform_macOS.cpp
+│   │   │       └── Memory.cpp
+│   │   │
+│   │   ├── HAL/                      # Hardware Abstraction Layer
+│   │   │   ├── Public/
+│   │   │   │   ├── GraphicsDevice.h  # Graphics device interface
+│   │   │   │   ├── Platform.h
+│   │   │   │   └── Window.h
+│   │   │   └── Private/
+│   │   │       ├── Vulkan/           # Vulkan backend
+│   │   │       │   ├── VulkanDevice.cpp
+│   │   │       │   ├── VulkanDevice.h
+│   │   │       │   ├── VulkanCommandBuffer.cpp
+│   │   │       │   ├── VulkanMemory.cpp
+│   │   │       │   └── VulkanSwapChain.cpp
+│   │   │       └── Platform/
+│   │   │           ├── WindowsWindow.cpp
+│   │   │           ├── LinuxWindow.cpp
+│   │   │           └── macOSWindow.cpp
+│   │   │
+│   │   ├── Renderer/                 # Rendering system
+│   │   │   ├── Public/
+│   │   │   │   ├── Renderer.h
+│   │   │   │   ├── RenderPass.h
+│   │   │   │   ├── Pipeline.h
+│   │   │   │   ├── Shader.h
+│   │   │   │   ├── Material.h
+│   │   │   │   ├── Mesh.h
+│   │   │   │   ├── Texture.h
+│   │   │   │   └── Camera.h
+│   │   │   └── Private/
+│   │   │       ├── ForwardRenderer.cpp
+│   │   │       ├── DeferredRenderer.cpp
+│   │   │       ├── ShaderCompiler.cpp
+│   │   │       ├── MaterialSystem.cpp
+│   │   │       └── TextureManager.cpp
+│   │   │
+│   │   ├── Physics/                  # Physics system (Bullet)
+│   │   │   ├── Public/
+│   │   │   │   ├── PhysicsWorld.h
+│   │   │   │   ├── RigidBody.h
+│   │   │   │   ├── Collider.h
+│   │   │   │   └── PhysicsMaterial.h
+│   │   │   └── Private/
+│   │   │       └── BulletIntegration.cpp
+│   │   │
+│   │   ├── Animation/                # Animation system
+│   │   │   ├── Public/
+│   │   │   │   ├── Skeleton.h
+│   │   │   │   ├── AnimationClip.h
+│   │   │   │   ├── Animator.h
+│   │   │   │   └── IKSolver.h
+│   │   │   └── Private/
+│   │   │       └── SkeletalAnimation.cpp
+│   │   │
+│   │   ├── Audio/                    # Audio system (OpenAL)
+│   │   │   ├── Public/
+│   │   │   │   ├── AudioEngine.h
+│   │   │   │   ├── AudioSource.h
+│   │   │   │   └── AudioListener.h
+│   │   │   └── Private/
+│   │   │       └── OpenALBackend.cpp
+│   │   │
+│   │   ├── Scene/                    # Scene management (ECS)
+│   │   │   ├── Public/
+│   │   │   │   ├── Scene.h
+│   │   │   │   ├── Entity.h
+│   │   │   │   ├── Component.h
+│   │   │   │   └── SceneManager.h
+│   │   │   └── Private/
+│   │   │       ├── ECS.cpp
+│   │   │       └── SceneGraph.cpp
+│   │   │
+│   │   ├── Resource/                 # Resource management
+│   │   │   ├── Public/
+│   │   │   │   ├── AssetManager.h
+│   │   │   │   ├── AssetImporter.h
+│   │   │   │   └── ResourceCache.h
+│   │   │   └── Private/
+│   │   │       ├── ModelImporter.cpp
+│   │   │       ├── TextureImporter.cpp
+│   │   │       └── AudioImporter.cpp
+│   │   │
+│   │   └── Scripting/                # Scripting layer
+│   │       ├── Public/
+│   │       │   ├── ScriptEngine.h
+│   │       │   └── ScriptComponent.h
+│   │       └── Private/
+│   │           ├── PythonBindings.cpp
+│   │           └── LuaBindings.cpp
+│   │
+│   └── Shaders/                      # GLSL shaders
+│       ├── Common/
+│       │   ├── Common.glsl
+│       │   └── PBR.glsl
+│       ├── Forward/
+│       │   ├── Forward.vert
+│       │   └── Forward.frag
+│       └── Deferred/
+│           ├── GBuffer.vert
+│           ├── GBuffer.frag
+│           ├── Lighting.vert
+│           └── Lighting.frag
+│
+├── 📂 Editor/                        # Editor application (C++/Qt)
+│   ├── CMakeLists.txt
+│   ├── Source/
+│   │   ├── Main.cpp
+│   │   ├── EditorApplication.h/.cpp
+│   │   ├── Panels/                   # Editor panels
+│   │   │   ├── ViewportPanel.h/.cpp
+│   │   │   ├── HierarchyPanel.h/.cpp
+│   │   │   ├── InspectorPanel.h/.cpp
+│   │   │   ├── AssetBrowserPanel.h/.cpp
+│   │   │   ├── ConsolePanel.h/.cpp
+│   │   │   └── AIAssistantPanel.h/.cpp
+│   │   └── Tools/
+│   │       ├── Gizmos.h/.cpp
+│   │       └── AssetImporter.h/.cpp
+│   └── Resources/
+│       ├── Icons/
+│       └── Fonts/
+│
+├── 📂 AI/                            # AI system (Python)
+│   ├── requirements.txt              # Python dependencies
+│   ├── setup.py
+│   ├── drx_ai/
+│   │   ├── __init__.py
+│   │   ├── core/                     # Core AI modules
+│   │   │   ├── __init__.py
+│   │   │   ├── orchestrator.py       # Main orchestrator
+│   │   │   ├── code_generator.py     # Code generation
+│   │   │   ├── validator.py          # Code validation
+│   │   │   └── compiler_interface.py # Compiler integration
+│   │   ├── models/                   # ML models
+│   │   │   ├── __init__.py
+│   │   │   ├── model_manager.py
+│   │   │   ├── fine_tuning.py
+│   │   │   └── inference.py
+│   │   ├── knowledge/                # Knowledge base
+│   │   │   ├── __init__.py
+│   │   │   ├── api_database.py       # API documentation
+│   │   │   ├── examples.py           # Code examples
+│   │   │   └── patterns.py           # Design patterns
+│   │   ├── learning/                 # Self-learning
+│   │   │   ├── __init__.py
+│   │   │   ├── data_collector.py
+│   │   │   ├── training_pipeline.py
+│   │   │   └── metrics.py
+│   │   └── game_gen/                 # Game generation
+│   │       ├── __init__.py
+│   │       ├── designer.py           # Game designer AI
+│   │       ├── asset_generator.py    # Asset generation
+│   │       └── code_generator.py     # Game code gen
+│   └── tests/
+│       └── test_*.py
+│
+├── 📂 ThirdParty/                    # External libraries
+│   ├── vulkan/
+│   ├── glfw/
+│   ├── glm/
+│   ├── assimp/
+│   ├── bullet/
+│   ├── openal-soft/
+│   ├── stb/
+│   ├── imgui/
+│   ├── EnTT/
+│   ├── rttr/
+│   └── pybind11/
+│
+├── 📂 Tests/                         # Test suites
+│   ├── UnitTests/
+│   ├── IntegrationTests/
+│   └── PerformanceTests/
+│
+├── 📂 Docs/                          # Documentation
+│   ├── API/                          # API documentation
+│   ├── Tutorials/                    # Tutorials
+│   └── Examples/                     # Code examples
+│
+├── 📂 Tools/                         # Development tools
+│   ├── BuildScripts/
+│   └── AssetPipeline/
+│
+└── 📂 Examples/                      # Example projects
+    └── FPSTemplate/
+        └── game_design.json          # FPS game template
+```
+
+## 📋 Key Files Explained
+
+### Root Level
+- **CMakeLists.txt**: Main build configuration
+- **build.sh**: Quick build script
+- **DRX_ENGINE_WHITEPAPER.md**: Complete technical spec
+- **QUICKSTART.md**: Getting started guide
+
+### Engine/
+Core C++17 engine code organized by system
+
+### AI/
+Python-based AI system for code generation and learning
+
+### Editor/
+Qt-based visual editor application
+
+### Examples/
+Sample games and templates demonstrating engine features
+
+## 🔧 Build Artifacts
+
+After building, you'll find:
+
+```
+build/
+├── bin/              # Executables
+│   ├── DRXEditor
+│   └── DRXRuntime
+├── lib/              # Libraries
+│   └── libDRXEngine.so
+└── CMakeCache.txt    # CMake cache
+```
+
+## 📦 Third-Party Dependencies
+
+All managed via CMake:
+- Vulkan SDK (graphics)
+- GLFW (windowing)
+- GLM (math)
+- Assimp (asset loading)
+- Bullet Physics
+- OpenAL Soft (audio)
+- ImGui (UI)
+- EnTT (ECS)
+- pybind11 (Python bindings)
+
+---
+
+**Navigate efficiently. Build powerfully. Create autonomously.** 🚀
