@@ -1,0 +1,170 @@
+{
+  "name": "FPS Template",
+  "version": "1.0.0",
+  "genre": "First-Person Shooter",
+
+  "mechanics": {
+    "movement": {
+      "walk_speed": 5.0,
+      "run_speed": 8.0,
+      "jump_height": 2.0,
+      "crouch_speed": 2.5,
+      "air_control": 0.3
+    },
+    "shooting": {
+      "weapons": [
+        {
+          "name": "Pistol",
+          "damage": 25,
+          "fire_rate": 2.0,
+          "accuracy": 0.95,
+          "magazine_size": 12,
+          "reload_time": 1.5,
+          "type": "semi_auto"
+        },
+        {
+          "name": "Rifle",
+          "damage": 30,
+          "fire_rate": 6.0,
+          "accuracy": 0.85,
+          "magazine_size": 30,
+          "reload_time": 2.0,
+          "type": "full_auto"
+        },
+        {
+          "name": "Shotgun",
+          "damage": 80,
+          "fire_rate": 1.0,
+          "accuracy": 0.7,
+          "magazine_size": 8,
+          "reload_time": 2.5,
+          "pellets": 8,
+          "type": "pump_action"
+        }
+      ]
+    },
+    "health": {
+      "max_health": 100,
+      "regeneration": false,
+      "armor": true,
+      "max_armor": 100,
+      "damage_reduction_with_armor": 0.5
+    }
+  },
+
+  "enemies": [
+    {
+      "type": "Basic",
+      "health": 50,
+      "damage": 10,
+      "speed": 3.0,
+      "ai_behavior": "chase_and_shoot",
+      "weapon": "pistol",
+      "detection_range": 20.0
+    },
+    {
+      "type": "Heavy",
+      "health": 150,
+      "damage": 20,
+      "speed": 2.0,
+      "ai_behavior": "patrol_and_shoot",
+      "weapon": "rifle",
+      "detection_range": 25.0
+    },
+    {
+      "type": "Sniper",
+      "health": 40,
+      "damage": 50,
+      "speed": 2.5,
+      "ai_behavior": "stationary_sniper",
+      "weapon": "sniper_rifle",
+      "detection_range": 50.0
+    },
+    {
+      "type": "Boss",
+      "health": 500,
+      "damage": 30,
+      "speed": 4.0,
+      "ai_behavior": "tactical",
+      "weapon": "multiple",
+      "special_abilities": ["teleport", "summon_minions", "rage_mode"],
+      "detection_range": 30.0
+    }
+  ],
+
+  "levels": [
+    {
+      "name": "Training Facility",
+      "difficulty": "easy",
+      "enemy_count": 10,
+      "layout": "linear",
+      "objectives": ["Reach exit", "Collect weapons"],
+      "time_limit": null
+    },
+    {
+      "name": "Urban Warfare",
+      "difficulty": "medium",
+      "enemy_count": 25,
+      "layout": "open",
+      "objectives": ["Clear all enemies", "Defend position"],
+      "time_limit": 600
+    },
+    {
+      "name": "Industrial Zone",
+      "difficulty": "medium",
+      "enemy_count": 30,
+      "layout": "maze",
+      "objectives": ["Find keycard", "Reach extraction"],
+      "time_limit": null
+    },
+    {
+      "name": "Final Showdown",
+      "difficulty": "hard",
+      "enemy_count": 50,
+      "layout": "arena",
+      "objectives": ["Defeat boss"],
+      "time_limit": null
+    }
+  ],
+
+  "ui": {
+    "hud_elements": [
+      "health_bar",
+      "armor_bar",
+      "ammo_counter",
+      "crosshair",
+      "minimap",
+      "objective_marker"
+    ],
+    "menus": [
+      "main_menu",
+      "pause_menu",
+      "settings",
+      "loadout",
+      "level_select"
+    ]
+  },
+
+  "audio": {
+    "music_tracks": [
+      "menu_theme",
+      "combat_music",
+      "boss_music",
+      "victory_fanfare"
+    ],
+    "sound_effects": [
+      "weapon_fire",
+      "reload",
+      "footsteps",
+      "enemy_death",
+      "player_hurt",
+      "pickup"
+    ]
+  },
+
+  "technical": {
+    "target_fps": 60,
+    "resolution_support": ["1080p", "1440p", "4k"],
+    "graphics_quality_presets": ["low", "medium", "high", "ultra"]
+  }
+}

@@ -1,0 +1,64 @@
+# Build directories
+build/
+out/
+cmake-build-*/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.vs/
+*.user
+*.suo
+
+# Compiled
+*.o
+*.obj
+*.a
+*.lib
+*.so
+*.dylib
+*.dll
+*.exe
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.Python
+venv/
+env/
+.env
+*.egg-info/
+dist/
+*.egg
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp
+*.tmp
+*.temp
+*.bak
+
+# ThirdParty (if using git submodules, keep tracked)
+# ThirdParty/
+
+# Shader cache
+*.spv
+
+# Assets (large files)
+*.fbx
+*.blend
+*.blend1
+*.psd
+*.tga
+# Keep small test assets
+!Assets/Test/*
