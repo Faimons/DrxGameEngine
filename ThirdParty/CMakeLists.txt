@@ -5,8 +5,9 @@
 add_library(stb INTERFACE)
 target_include_directories(stb INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/stb)
 
-# ImGui - Immediate Mode GUI
-if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/imgui/imgui.cpp)
+# ImGui - Immediate Mode GUI (requires OpenGL and GLFW)
+find_package(OpenGL QUIET)
+if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/imgui/imgui.cpp AND OpenGL_FOUND AND TARGET glfw)
     add_library(imgui STATIC
         imgui/imgui.cpp
         imgui/imgui_demo.cpp
@@ -21,12 +22,10 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/imgui/imgui.cpp)
         ${CMAKE_CURRENT_SOURCE_DIR}/imgui/backends
     )
     target_compile_definitions(imgui PUBLIC IMGUI_IMPL_OPENGL_LOADER_CUSTOM)
-    if(TARGET glfw)
-        target_link_libraries(imgui PUBLIC glfw)
-    endif()
-    # Link OpenGL
-    find_package(OpenGL REQUIRED)
-    target_link_libraries(imgui PUBLIC OpenGL::GL)
+    target_link_libraries(imgui PUBLIC glfw OpenGL::GL)
+    message(STATUS "ImGui configured with OpenGL3/GLFW backend")
+else()
+    message(STATUS "ImGui skipped (missing OpenGL or GLFW)")
 endif()
 
 # EnTT - Entity Component System (Header-only)
