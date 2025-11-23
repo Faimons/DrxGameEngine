@@ -78,17 +78,30 @@ cat QUICKSTART.md
 ### 3. Install Dependencies
 ```bash
 # Ubuntu/Debian
-sudo apt-get install build-essential cmake git python3 \
-    libvulkan-dev vulkan-tools libglfw3-dev
+sudo apt-get install build-essential cmake git \
+    libglfw3-dev libgl1-mesa-dev libxrandr-dev libxi-dev
 
-# Python
-cd AI
-pip3 install -r requirements.txt
+# Optional: Vulkan (for full engine)
+sudo apt-get install libvulkan-dev vulkan-tools
+
+# Windows (with Visual Studio)
+# Install from: https://vulkan.lunarg.com/
+# GLFW from: https://www.glfw.org/
 ```
 
 ### 4. Build Project
 ```bash
+# Build all demos
 ./build.sh
+
+# Or manually:
+mkdir -p build && cd build
+cmake .. -DCMAKE_BUILD_TYPE=Release
+cmake --build . --parallel
+
+# Run the games!
+./bin/BattlefieldDemo   # Advanced FPS with terrain, vehicles
+./bin/FPSDemo           # Simple shooter demo
 ```
 
 ---
