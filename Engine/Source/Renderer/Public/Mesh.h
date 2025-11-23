@@ -8,6 +8,7 @@
 #include "Core/Public/Math/Vector2.h"
 #include "Core/Public/Math/Vector3.h"
 #include "Core/Public/Math/Vector4.h"
+#include "Core/Public/Math/Transform.h"
 #include "HAL/Public/GraphicsDevice.h"
 
 #include <vulkan/vulkan.h>

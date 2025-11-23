@@ -1,0 +1,24 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(setup.bat)",
+      "Bash(cmd.exe /c setup.bat)",
+      "Bash(cmd.exe /c \"setup.bat 2>&1\")",
+      "Bash(cmake:*)",
+      "Bash(git --version:*)",
+      "Bash(winget install:*)",
+      "Bash(powershell -Command \"Start-Process winget -ArgumentList ''install KhronosGroup.VulkanSDK --silent --accept-package-agreements'' -Wait -Verb RunAs\")",
+      "Bash(powershell -Command:*)",
+      "Bash(cmd /c \"dir \"\"C:\\Program Files\\VulkanSDK\"\" 2>nul\")",
+      "Bash(cmd /c \"dir \"\"C:\\Program Files (x86)\\VulkanSDK\"\" 2>nul\")",
+      "Bash(git submodule:*)",
+      "Bash(cat:*)",
+      "Bash(git clone:*)",
+      "Bash(/c/Users/simon/source/repos/DrxGameEngine/build/bin/Release/FPSDemo.exe)",
+      "Bash(timeout 30 /c/Users/simon/source/repos/DrxGameEngine/build/bin/Release/FPSDemo.exe:*)",
+      "Bash(timeout 15:*)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

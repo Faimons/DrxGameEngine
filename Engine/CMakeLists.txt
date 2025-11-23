@@ -47,11 +47,31 @@ target_include_directories(DRXEngine
         ${CMAKE_CURRENT_SOURCE_DIR}/Source/HAL/Private
 )
 
+# Include third-party headers
+target_include_directories(DRXEngine
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/ThirdParty/rapidjson/include
+        ${CMAKE_SOURCE_DIR}/ThirdParty/lua
+        ${CMAKE_SOURCE_DIR}/ThirdParty/assimp/include
+        ${CMAKE_SOURCE_DIR}/ThirdParty/stb
+        ${CMAKE_SOURCE_DIR}/ThirdParty/zlib
+        ${CMAKE_SOURCE_DIR}/ThirdParty/libpng
+)
+
 # Link libraries
 target_link_libraries(DRXEngine
     PUBLIC
         Vulkan::Vulkan
+    PRIVATE
+        spdlog
+        EnTT
+        vma
 )
+
+# Disable warnings for third-party code
+if(MSVC)
+    target_compile_options(DRXEngine PRIVATE /W4 /wd4251)
+endif()
 
 # Conditionally link GLFW
 if(TARGET glfw)

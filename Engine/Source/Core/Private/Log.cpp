@@ -6,6 +6,10 @@
 #include <ctime>
 #include <chrono>
 
+#ifdef DRX_PLATFORM_WINDOWS
+#include <windows.h>
+#endif
+
 namespace DRX {
 
 Logger& Logger::Instance() {

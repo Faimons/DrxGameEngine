@@ -6,6 +6,7 @@
 
 #include "Core/Public/CoreTypes.h"
 #include "Core/Public/Platform.h"
+#include "Core/Public/Assert.h"
 #include "Core/Public/Math/Transform.h"
 
 #include <typeindex>

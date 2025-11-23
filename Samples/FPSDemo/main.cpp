@@ -1,523 +1,361 @@
 /**
- * DRX Engine - FPS Demo
- * A sample game demonstrating the engine's FPS framework
+ * DRX Engine - FPS 3D Shooter
+ * Simplified rendering with immediate mode
  */
 
-#include "Core/Public/CoreTypes.h"
-#include "Core/Public/Engine.h"
-#include "Renderer/Public/DeferredRenderer.h"
-#include "Game/Public/FPSFramework.h"
-#include "Camera/Public/CameraSystem.h"
-#include "Terrain/Public/TerrainSystem.h"
-#include "Input/Public/InputSystem.h"
-#include "Audio/Public/AudioSystem.h"
-#include "Debug/Public/DebugSystem.h"
+#include <iostream>
+#include <vector>
+#include <cmath>
+#include <cstdlib>
+#include <ctime>
+#include <chrono>
+#include <GLFW/glfw3.h>
 
-using namespace DRX;
+// ============================================================================
+// Simple Vector/Matrix Math
+// ============================================================================
 
-/**
- * Demo Game Mode - Wave-based survival
- */
-class SurvivalGameMode : public Game::GameMode {
-public:
-    void Initialize() override {
-        GameMode::Initialize();
-        wave_number_ = 0;
-        enemies_remaining_ = 0;
-        spawn_timer_ = 0;
+struct Vec3 {
+    float x, y, z;
+    Vec3(float x=0, float y=0, float z=0) : x(x), y(y), z(z) {}
+    Vec3 operator+(const Vec3& v) const { return Vec3(x+v.x, y+v.y, z+v.z); }
+    Vec3 operator-(const Vec3& v) const { return Vec3(x-v.x, y-v.y, z-v.z); }
+    Vec3 operator*(float f) const { return Vec3(x*f, y*f, z*f); }
+    float dot(const Vec3& v) const { return x*v.x + y*v.y + z*v.z; }
+    float len() const { return std::sqrt(x*x + y*y + z*z); }
+    Vec3 norm() const { float l = len(); return l > 0 ? Vec3(x/l, y/l, z/l) : Vec3(); }
+};
+
+// ============================================================================
+// Game Data
+// ============================================================================
+
+struct Enemy {
+    Vec3 p;
+    float h = 100;
+    bool alive = true;
+    float t = 0;
+
+    void Upd(Vec3 pp, float dt) {
+        if(!alive) return;
+        Vec3 to = pp - p;
+        float d = to.len();
+        if(d < 30 && d > 0.1f) {
+            p = p + to.norm() * 2.0f * dt;
+            if(d < 2) { t -= dt; if(t <= 0) {t = 1; } }
+        }
     }
 
-    void Update(float32 delta_time) override {
-        GameMode::Update(delta_time);
+    bool Hit(float dmg) {
+        h -= dmg;
+        if(h <= 0) alive = false;
+        return h <= 0;
+    }
+};
 
-        if (!IsMatchActive()) return;
+struct Weap {
+    const char*n;
+    float dmg, fr, ammo, mxammo, reload;
+    bool CanF() const { return reload <= 0 && ammo > 0; }
+    void Fire() { if(CanF()) { ammo--; reload = 1.0f/fr; } }
+    void Upd(float dt) { if(reload > 0) reload -= dt; }
+};
 
-        // Check if wave is complete
-        if (enemies_remaining_ <= 0) {
-            StartNextWave();
-        }
+struct Player {
+    Vec3 p = Vec3(0, 1.7f, 0);
+    float yaw = 0, pitch = 0, h = 100;
+    int score = 0, wave = 1, kills = 0;
+    std::vector<Weap> w;
+    int cw = 0;
 
-        // Spawn enemies
-        if (enemies_to_spawn_ > 0) {
-            spawn_timer_ -= delta_time;
-            if (spawn_timer_ <= 0) {
-                SpawnEnemy();
-                spawn_timer_ = spawn_interval_;
+    Player() {
+        w.push_back({"Rifle", 25, 10, 300, 300, 0});
+        w.push_back({"Pistol", 35, 5, 100, 100, 0});
+        w.push_back({"Shotgun", 60, 2, 50, 50, 0});
+    }
+
+    void Upd(float dt) { if(cw < w.size()) w[cw].Upd(dt); }
+
+    Vec3 Look() const {
+        float ry = yaw * 3.14159f / 180, rp = pitch * 3.14159f / 180;
+        return Vec3(std::sin(ry)*std::cos(rp), std::sin(rp), std::cos(ry)*std::cos(rp)).norm();
+    }
+};
+
+struct Game {
+    Player pl;
+    std::vector<Enemy> en;
+    int ens = 5;
+    float st = 0;
+    bool over = false;
+
+    void Spawn() {
+        if(ens > 0) {
+            st -= 0.016f;
+            if(st <= 0) {
+                float a = (rand()%360) * 3.14159f / 180;
+                float d = 20 + rand()%10;
+                Enemy e;
+                e.p = Vec3(pl.p.x + std::cos(a)*d, 0.5f, pl.p.z + std::sin(a)*d);
+                en.push_back(e);
+                ens--;
+                st = 2.0f;
             }
         }
     }
 
-    void OnEnemyDeath(Game::Enemy* enemy, const Game::DamageInfo& damage) override {
-        GameMode::OnEnemyDeath(enemy, damage);
-        enemies_remaining_--;
+    void UpdE(float dt) {
+        for(auto&e:en) e.Upd(pl.p, dt);
+        for(auto it=en.begin();it!=en.end();) {
+            if(!it->alive) { pl.score+=100; pl.kills++; it=en.erase(it); }
+            else ++it;
+        }
     }
 
-    int32 GetWaveNumber() const { return wave_number_; }
-    int32 GetEnemiesRemaining() const { return enemies_remaining_; }
-
-private:
-    void StartNextWave() {
-        wave_number_++;
-        enemies_to_spawn_ = 5 + wave_number_ * 2;  // Increasing difficulty
-        enemies_remaining_ = enemies_to_spawn_;
-        spawn_interval_ = std::max(0.5f, 2.0f - wave_number_ * 0.1f);
-        spawn_timer_ = 2.0f;  // Delay before first spawn
+    void Coll() {
+        for(auto&e:en) {
+            if(e.alive && e.t <= 0) {
+                float d = (pl.p - e.p).len();
+                if(d < 2) { pl.h -= 5; e.t = 1; }
+            }
+        }
+        if(pl.h <= 0) over = true;
     }
 
-    void SpawnEnemy() {
-        if (enemies_to_spawn_ <= 0) return;
-
-        Game::EnemyConfig config;
-        config.name = "Zombie";
-        config.max_health = 50.0f + wave_number_ * 10.0f;
-        config.damage = 10.0f + wave_number_ * 2.0f;
-        config.walk_speed = 2.0f + wave_number_ * 0.1f;
-        config.run_speed = 4.0f + wave_number_ * 0.2f;
-        config.attack_range = 2.0f;
-        config.sight_range = 30.0f;
-        config.score_value = 100 + wave_number_ * 10;
-
-        auto spawn = Game::GameWorld::Instance().GetRandomSpawnPoint(false);
-        Game::GameWorld::Instance().SpawnEnemy(config, spawn.position);
-
-        enemies_to_spawn_--;
+    void NextW() {
+        if(en.empty() && ens == 0) {
+            pl.wave++;
+            ens = 5 + pl.wave*2;
+            st = 2.0f;
+        }
     }
-
-    int32 wave_number_ = 0;
-    int32 enemies_remaining_ = 0;
-    int32 enemies_to_spawn_ = 0;
-    float32 spawn_timer_ = 0;
-    float32 spawn_interval_ = 1.0f;
 };
 
-/**
- * FPS Demo Application
- */
-class FPSDemoApp {
-public:
-    bool Initialize() {
-        // Initialize core systems
-        Debug::Console::Instance().Initialize();
-        Debug::Profiler::Instance().SetEnabled(true);
+struct Input {
+    bool w, a, s, d;
+    float mx, my;
+    bool lc;
+    int w1, w2, w3;
+};
 
-        // Create window and renderer
-        // Renderer::DeferredRenderer::Instance().Initialize(1920, 1080);
+Input inp = {0};
 
-        // Initialize audio
-        // Audio::AudioSystem::Instance().Initialize();
+void KeyCB(GLFWwindow*,int k,int,int a,int) {
+    bool p = a==GLFW_PRESS || a==GLFW_REPEAT;
+    if(k==GLFW_KEY_W) inp.w=p;
+    if(k==GLFW_KEY_A) inp.a=p;
+    if(k==GLFW_KEY_S) inp.s=p;
+    if(k==GLFW_KEY_D) inp.d=p;
+    if(k==GLFW_KEY_1) inp.w1=1;
+    if(k==GLFW_KEY_2) inp.w2=1;
+    if(k==GLFW_KEY_3) inp.w3=1;
+}
 
-        // Initialize input
-        InitializeInput();
+void MouseCB(GLFWwindow*,int b,int a,int) {
+    if(b==GLFW_MOUSE_BUTTON_LEFT) inp.lc=(a==GLFW_PRESS);
+}
 
-        // Initialize terrain
-        InitializeTerrain();
+void MotionCB(GLFWwindow*,double x,double y) {
+    static double lx=x, ly=y;
+    inp.mx = (x-lx)*0.1f; inp.my = (ly-y)*0.1f;
+    lx=x; ly=y;
+}
 
-        // Initialize game
-        InitializeGame();
+// ============================================================================
+// Rendering
+// ============================================================================
 
-        Debug::Console::Instance().Print("FPS Demo initialized");
-        return true;
+void DrawCube(Vec3 pos, float size, float r, float g, float b) {
+    glPushMatrix();
+    glTranslatef(pos.x, pos.y, pos.z);
+    glColor3f(r, g, b);
+
+    float s = size * 0.5f;
+    glBegin(GL_QUADS);
+    // Front
+    glVertex3f(-s,-s, s); glVertex3f( s,-s, s); glVertex3f( s, s, s); glVertex3f(-s, s, s);
+    // Back
+    glVertex3f(-s,-s,-s); glVertex3f(-s, s,-s); glVertex3f( s, s,-s); glVertex3f( s,-s,-s);
+    // Left
+    glVertex3f(-s,-s,-s); glVertex3f(-s,-s, s); glVertex3f(-s, s, s); glVertex3f(-s, s,-s);
+    // Right
+    glVertex3f( s,-s,-s); glVertex3f( s, s,-s); glVertex3f( s, s, s); glVertex3f( s,-s, s);
+    // Top
+    glVertex3f(-s, s,-s); glVertex3f(-s, s, s); glVertex3f( s, s, s); glVertex3f( s, s,-s);
+    // Bottom
+    glVertex3f(-s,-s,-s); glVertex3f( s,-s,-s); glVertex3f( s,-s, s); glVertex3f(-s,-s, s);
+    glEnd();
+
+    glPopMatrix();
+}
+
+void DrawPlane(Vec3 pos, float size, float r, float g, float b) {
+    glPushMatrix();
+    glColor3f(r, g, b);
+    glBegin(GL_QUADS);
+    float s = size;
+    glVertex3f(pos.x-s, pos.y, pos.z-s);
+    glVertex3f(pos.x+s, pos.y, pos.z-s);
+    glVertex3f(pos.x+s, pos.y, pos.z+s);
+    glVertex3f(pos.x-s, pos.y, pos.z+s);
+    glEnd();
+    glPopMatrix();
+}
+
+int main() {
+    srand((unsigned)time(0));
+
+    if(!glfwInit()) {
+        std::cerr << "Failed to initialize GLFW\n";
+        return 1;
     }
 
-    void Shutdown() {
-        Game::GameWorld::Instance().Shutdown();
-        Terrain::TerrainManager::Instance().Shutdown();
-        Camera::CameraManager::Instance().Shutdown();
-        Debug::Console::Instance().Shutdown();
+    // Request OpenGL 2.1 for maximum compatibility
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 2);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
+
+    GLFWwindow* window = glfwCreateWindow(1280, 720, "DRX 3D Shooter", nullptr, nullptr);
+    if(!window) {
+        std::cerr << "Failed to create window\n";
+        glfwTerminate();
+        return 1;
     }
 
-    void Run() {
-        running_ = true;
-        float32 delta_time = 1.0f / 60.0f;
-        const float32 fixed_delta = 1.0f / 60.0f;
-        float32 accumulator = 0;
+    glfwMakeContextCurrent(window);
+    glfwSetKeyCallback(window, KeyCB);
+    glfwSetMouseButtonCallback(window, MouseCB);
+    glfwSetCursorPosCallback(window, MotionCB);
+    glfwSetInputMode(window, GLFW_CURSOR, GLFW_CURSOR_DISABLED);
+    glfwSwapInterval(1);
 
-        while (running_) {
-            DRX_PROFILE_SCOPE("Frame");
+    // Setup OpenGL
+    glEnable(GL_DEPTH_TEST);
+    glClearColor(0.1f, 0.1f, 0.15f, 1.0f);
+    glEnable(GL_LIGHTING);
+    glEnable(GL_LIGHT0);
 
-            Debug::Profiler::Instance().BeginFrame();
+    // Setup projection manually (without GLU)
+    glMatrixMode(GL_PROJECTION);
+    glLoadIdentity();
+    float fov = 45.0f * 3.14159f / 180.0f;  // Convert to radians
+    float aspect = 1280.0f / 720.0f;
+    float f = 1.0f / std::tan(fov * 0.5f);
+    float nearZ = 0.1f, farZ = 500.0f;
 
-            // Process input
-            ProcessInput();
+    float proj[16] = {
+        f/aspect, 0, 0, 0,
+        0, f, 0, 0,
+        0, 0, (farZ+nearZ)/(nearZ-farZ), -1,
+        0, 0, (2*farZ*nearZ)/(nearZ-farZ), 0
+    };
+    glLoadMatrixf(proj);
+    glMatrixMode(GL_MODELVIEW);
 
-            // Fixed timestep physics
-            accumulator += delta_time;
-            while (accumulator >= fixed_delta) {
-                {
-                    DRX_PROFILE_SCOPE("FixedUpdate");
-                    Game::GameWorld::Instance().FixedUpdate(fixed_delta);
+    Game g;
+    std::cout << "DRX 3D SHOOTER\nControls: WASD move, Mouse look, Click shoot, 1/2/3 weapons, ESC quit\n";
+
+    auto lt = std::chrono::high_resolution_clock::now();
+
+    while(!glfwWindowShouldClose(window)) {
+        auto ct = std::chrono::high_resolution_clock::now();
+        float dt = std::chrono::duration<float>(ct-lt).count();
+        lt = ct;
+        if(dt > 0.033f) dt = 0.033f;
+
+        // Update
+        Vec3 mv;
+        if(inp.w) mv = mv + Vec3(0,0,1);
+        if(inp.s) mv = mv + Vec3(0,0,-1);
+        if(inp.a) mv = mv + Vec3(-1,0,0);
+        if(inp.d) mv = mv + Vec3(1,0,0);
+        if(mv.len() > 0) g.pl.p = g.pl.p + mv.norm() * 5.0f * dt;
+
+        g.pl.yaw += inp.mx;
+        g.pl.pitch += inp.my;
+        inp.mx = 0; inp.my = 0;
+        if(g.pl.pitch > 89) g.pl.pitch = 89;
+        if(g.pl.pitch < -89) g.pl.pitch = -89;
+
+        if(inp.w1) g.pl.cw = 0;
+        if(inp.w2) g.pl.cw = 1;
+        if(inp.w3) g.pl.cw = 2;
+        inp.w1 = inp.w2 = inp.w3 = 0;
+
+        if(inp.lc && !g.over) {
+            auto& we = g.pl.w[g.pl.cw];
+            if(we.CanF()) {
+                we.Fire();
+                Vec3 rd = g.pl.Look();
+                float cd = 999;
+                int he = -1;
+                for(size_t i=0;i<g.en.size();i++) {
+                    Vec3 te = g.en[i].p - g.pl.p;
+                    float d = te.len();
+                    if(d < 50 && d < cd) {
+                        float ang = std::acos(te.norm().dot(rd));
+                        if(ang < 0.2f) { cd = d; he = i; }
+                    }
                 }
-                accumulator -= fixed_delta;
+                if(he >= 0) {
+                    if(g.en[he].Hit(we.dmg)) { g.pl.score += 100; g.pl.kills++; }
+                }
             }
+        }
 
-            // Update game
-            {
-                DRX_PROFILE_SCOPE("Update");
-                Update(delta_time);
+        g.pl.Upd(dt);
+        g.Spawn();
+        g.UpdE(dt);
+        g.Coll();
+        g.NextW();
+
+        // Render
+        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+        glMatrixMode(GL_MODELVIEW);
+        glLoadIdentity();
+
+        // Setup camera manually (without gluLookAt)
+        Vec3 eye = g.pl.p;
+        Vec3 look = g.pl.Look();
+        Vec3 at = eye + look;
+        Vec3 up(0, 1, 0);
+
+        Vec3 f = (at - eye).norm();
+        Vec3 s = Vec3(f.y*up.z-f.z*up.y, f.z*up.x-f.x*up.z, f.x*up.y-f.y*up.x).norm();
+        Vec3 u = Vec3(s.y*f.z-s.z*f.y, s.z*f.x-s.x*f.z, s.x*f.y-s.y*f.x);
+
+        float cam[16] = {
+            s.x, u.x, -f.x, 0,
+            s.y, u.y, -f.y, 0,
+            s.z, u.z, -f.z, 0,
+            -s.dot(eye), -u.dot(eye), f.dot(eye), 1
+        };
+        glMultMatrixf(cam);
+
+        // Draw ground
+        DrawPlane(Vec3(0, -1, 0), 50, 0.2f, 0.6f, 0.2f);
+
+        // Draw enemies
+        for(auto& e : g.en) {
+            if(e.alive) {
+                DrawCube(e.p, 0.5f, 1.0f, 0.0f, 0.0f);
             }
-
-            // Render
-            {
-                DRX_PROFILE_SCOPE("Render");
-                Render();
-            }
-
-            Debug::Profiler::Instance().EndFrame();
-
-            // Simple frame timing
-            // In real app, would use proper timing
-        }
-    }
-
-private:
-    void InitializeInput() {
-        auto& input = Input::InputSystem::Instance();
-        // input.Initialize(window_handle);
-
-        // Bind actions
-        input.CreateAction("Move");
-        input.CreateAction("Look");
-        input.CreateAction("Fire");
-        input.CreateAction("Aim");
-        input.CreateAction("Reload");
-        input.CreateAction("Jump");
-        input.CreateAction("Sprint");
-        input.CreateAction("Crouch");
-
-        // Keyboard bindings
-        input.BindKey(Input::KeyCode::W, "MoveForward");
-        input.BindKey(Input::KeyCode::S, "MoveBack");
-        input.BindKey(Input::KeyCode::A, "MoveLeft");
-        input.BindKey(Input::KeyCode::D, "MoveRight");
-        input.BindKey(Input::KeyCode::Space, "Jump");
-        input.BindKey(Input::KeyCode::LeftShift, "Sprint");
-        input.BindKey(Input::KeyCode::LeftControl, "Crouch");
-        input.BindKey(Input::KeyCode::R, "Reload");
-
-        // Mouse bindings
-        input.BindMouseButton(Input::MouseButton::Left, "Fire");
-        input.BindMouseButton(Input::MouseButton::Right, "Aim");
-    }
-
-    void InitializeTerrain() {
-        Terrain::TerrainConfig config;
-        config.terrain_width = 256.0f;
-        config.terrain_length = 256.0f;
-        config.height_scale = 20.0f;
-        config.num_chunks_x = 4;
-        config.num_chunks_z = 4;
-        config.chunk_resolution = 32;
-
-        auto& terrain_mgr = Terrain::TerrainManager::Instance();
-        terrain_mgr.Initialize();
-
-        terrain_ = terrain_mgr.CreateTerrain("MainTerrain", config);
-        terrain_mgr.SetActiveTerrain(terrain_);
-
-        // Generate procedural terrain
-        terrain_->GetHeightmap().GeneratePerlinNoise(4.0f, 6, 0.5f);
-        terrain_->GetHeightmap().ApplyHydraulicErosion(10000);
-
-        // Add terrain layers
-        Terrain::TerrainLayer grass;
-        grass.name = "Grass";
-        grass.tiling_x = 20.0f;
-        grass.tiling_y = 20.0f;
-        grass.roughness = 0.9f;
-        terrain_->AddLayer(grass);
-
-        Terrain::TerrainLayer rock;
-        rock.name = "Rock";
-        rock.tiling_x = 10.0f;
-        rock.tiling_y = 10.0f;
-        rock.roughness = 0.7f;
-        terrain_->AddLayer(rock);
-
-        // Add foliage
-        Terrain::FoliageType tree;
-        tree.name = "Tree";
-        tree.density = 0.5f;
-        tree.min_scale = 0.8f;
-        tree.max_scale = 1.5f;
-        tree.min_slope = 0.0f;
-        tree.max_slope = 30.0f;
-        terrain_->GetFoliage().AddFoliageType(tree);
-
-        terrain_->GetFoliage().Generate(
-            terrain_->GetHeightmap(),
-            terrain_->GetSplatMap(),
-            config
-        );
-    }
-
-    void InitializeGame() {
-        auto& world = Game::GameWorld::Instance();
-        world.Initialize();
-
-        // Create game mode
-        auto game_mode = std::make_shared<SurvivalGameMode>();
-        world.SetGameMode(game_mode);
-        survival_mode_ = static_cast<SurvivalGameMode*>(game_mode.get());
-
-        // Add spawn points
-        for (int i = 0; i < 4; ++i) {
-            Game::SpawnPoint player_spawn;
-            player_spawn.position = Math::Vector3(128.0f + i * 10.0f, 0, 128.0f);
-            player_spawn.is_player_spawn = true;
-            world.AddSpawnPoint(player_spawn);
         }
 
-        for (int i = 0; i < 8; ++i) {
-            Game::SpawnPoint enemy_spawn;
-            float angle = i * 45.0f * 3.14159265359f / 180.0f;
-            enemy_spawn.position = Math::Vector3(
-                128.0f + cos(angle) * 50.0f,
-                0,
-                128.0f + sin(angle) * 50.0f
-            );
-            enemy_spawn.is_enemy_spawn = true;
-            world.AddSpawnPoint(enemy_spawn);
+        // Text rendering (hud info to console)
+        static int fc = 0;
+        if(++fc % 30 == 0) {
+            std::cout << "\rH:" << (int)g.pl.h << " S:" << g.pl.score
+                      << " W:" << g.pl.wave << " E:" << g.en.size()
+                      << " WP:" << g.pl.w[g.pl.cw].n << std::flush;
         }
 
-        // Spawn player
-        auto spawn = world.GetRandomSpawnPoint(true);
-        player_ = world.SpawnPlayer(spawn.position);
-
-        // Give player weapons
-        GivePlayerWeapons();
-
-        // Initialize camera
-        Camera::CameraManager::Instance().Initialize();
-        camera_ = Camera::CameraManager::Instance().GetMainCamera();
-        camera_->SetFieldOfView(90.0f);
-        camera_->SetNearPlane(0.1f);
-        camera_->SetFarPlane(500.0f);
-
-        // Start match
-        game_mode->StartMatch();
+        glfwSwapBuffers(window);
+        glfwPollEvents();
+        if(glfwGetKey(window, GLFW_KEY_ESCAPE)) break;
     }
 
-    void GivePlayerWeapons() {
-        // Assault Rifle
-        Game::WeaponConfig rifle_config;
-        rifle_config.name = "Assault Rifle";
-        rifle_config.slot = Game::WeaponSlot::Primary;
-        rifle_config.damage = 25.0f;
-        rifle_config.fire_rate = 10.0f;
-        rifle_config.magazine_size = 30;
-        rifle_config.max_ammo = 120;
-        rifle_config.reload_time = 2.0f;
-        rifle_config.spread = 2.0f;
-        rifle_config.recoil = 3.0f;
-        rifle_config.range = 100.0f;
-        rifle_config.is_hitscan = true;
-        rifle_config.aim_fov = 60.0f;
-
-        auto rifle = std::make_shared<Game::Weapon>(rifle_config);
-        player_->GiveWeapon(rifle);
-
-        // Pistol
-        Game::WeaponConfig pistol_config;
-        pistol_config.name = "Pistol";
-        pistol_config.slot = Game::WeaponSlot::Secondary;
-        pistol_config.damage = 35.0f;
-        pistol_config.fire_rate = 4.0f;
-        pistol_config.magazine_size = 12;
-        pistol_config.max_ammo = 48;
-        pistol_config.reload_time = 1.5f;
-        pistol_config.spread = 1.0f;
-        pistol_config.recoil = 5.0f;
-        pistol_config.range = 50.0f;
-        pistol_config.is_hitscan = true;
-        pistol_config.aim_fov = 70.0f;
-
-        auto pistol = std::make_shared<Game::Weapon>(pistol_config);
-        player_->GiveWeapon(pistol);
-
-        // Knife
-        Game::WeaponConfig knife_config;
-        knife_config.name = "Knife";
-        knife_config.slot = Game::WeaponSlot::Melee;
-        knife_config.damage = 50.0f;
-        knife_config.fire_rate = 2.0f;
-        knife_config.magazine_size = 1;
-        knife_config.max_ammo = 999;
-        knife_config.reload_time = 0.0f;
-        knife_config.range = 2.0f;
-        knife_config.is_hitscan = true;
-
-        auto knife = std::make_shared<Game::Weapon>(knife_config);
-        player_->GiveWeapon(knife);
-    }
-
-    void ProcessInput() {
-        auto& input = Input::InputSystem::Instance();
-        // input.Update();
-
-        if (!player_) return;
-
-        // Movement
-        Math::Vector2 move_input;
-        if (input.IsKeyDown(Input::KeyCode::W)) move_input.y += 1.0f;
-        if (input.IsKeyDown(Input::KeyCode::S)) move_input.y -= 1.0f;
-        if (input.IsKeyDown(Input::KeyCode::A)) move_input.x -= 1.0f;
-        if (input.IsKeyDown(Input::KeyCode::D)) move_input.x += 1.0f;
-        player_->SetMoveInput(move_input);
-
-        // Look (mouse delta)
-        Math::Vector2 mouse_delta = input.GetMouseDelta();
-        player_->SetLookInput(mouse_delta * 0.1f);
-
-        // Actions
-        player_->SetJumpInput(input.IsKeyDown(Input::KeyCode::Space));
-        player_->SetSprintInput(input.IsKeyDown(Input::KeyCode::LeftShift));
-        player_->SetCrouchInput(input.IsKeyDown(Input::KeyCode::LeftControl));
-        player_->SetFireInput(input.IsMouseButtonDown(Input::MouseButton::Left));
-        player_->SetAimInput(input.IsMouseButtonDown(Input::MouseButton::Right));
-
-        if (input.IsKeyPressed(Input::KeyCode::R)) {
-            player_->SetReloadInput(true);
-        }
-
-        // Weapon switching
-        if (input.IsKeyPressed(Input::KeyCode::Num1)) {
-            player_->SetWeaponSwitchInput(0);
-        } else if (input.IsKeyPressed(Input::KeyCode::Num2)) {
-            player_->SetWeaponSwitchInput(1);
-        } else if (input.IsKeyPressed(Input::KeyCode::Num3)) {
-            player_->SetWeaponSwitchInput(2);
-        }
-
-        // Debug toggles
-        if (input.IsKeyPressed(Input::KeyCode::F1)) {
-            Debug::StatsOverlay::Instance().SetVisible(
-                !Debug::StatsOverlay::Instance().IsVisible()
-            );
-        }
-
-        // Quit
-        if (input.IsKeyPressed(Input::KeyCode::Escape)) {
-            running_ = false;
-        }
-    }
-
-    void Update(float32 delta_time) {
-        // Update game world
-        Game::GameWorld::Instance().Update(delta_time);
-
-        // Update camera to follow player
-        if (player_ && camera_) {
-            camera_->SetPosition(player_->GetCameraPosition());
-
-            float32 rad = 3.14159265359f / 180.0f;
-            Math::Quaternion yaw_rot = Math::Quaternion::FromAxisAngle(
-                Math::Vector3::Up, player_->GetYaw() * rad
-            );
-            Math::Quaternion pitch_rot = Math::Quaternion::FromAxisAngle(
-                Math::Vector3::Right, player_->GetPitch() * rad
-            );
-            camera_->SetRotation(yaw_rot * pitch_rot);
-            camera_->SetFieldOfView(player_->GetCurrentFOV());
-
-            camera_->UpdateMatrices();
-        }
-
-        // Update terrain
-        if (terrain_ && camera_) {
-            terrain_->Update(camera_->GetPosition(), delta_time);
-        }
-
-        // Update debug overlay
-        Debug::StatsOverlay::Instance().Update(delta_time);
-    }
-
-    void Render() {
-        if (!camera_) return;
-
-        // auto& renderer = Renderer::DeferredRenderer::Instance();
-        // renderer.BeginFrame();
-
-        // Render terrain
-        // if (terrain_) {
-        //     terrain_->Render(renderer.GetCommandBuffer(), camera_->GetViewProjectionMatrix());
-        // }
-
-        // Render game entities
-        // for (auto& enemy : Game::GameWorld::Instance().GetEnemies()) {
-        //     renderer.SubmitMesh(enemy->GetMesh(), enemy->GetPosition(), enemy->GetRotation());
-        // }
-
-        // Render current weapon
-        // if (player_ && player_->GetCurrentWeapon()) {
-        //     // Render weapon model
-        // }
-
-        // Debug rendering
-        if (Debug::DebugRenderer::Instance().IsEnabled()) {
-            // Draw enemy positions
-            for (const auto& enemy : Game::GameWorld::Instance().GetEnemies()) {
-                Debug::DebugRenderer::Instance().DrawWireSphere(
-                    enemy->GetPosition(),
-                    1.0f,
-                    enemy->GetHealth().IsAlive() ? Math::Vector4(1, 0, 0, 1) : Math::Vector4(0.5f, 0.5f, 0.5f, 1)
-                );
-            }
-
-            // Draw spawn points
-            // Draw grid
-            Debug::DebugRenderer::Instance().DrawGrid(
-                Math::Vector3(128, 0, 128),
-                256.0f,
-                16
-            );
-        }
-
-        Debug::DebugRenderer::Instance().Render(camera_->GetViewProjectionMatrix());
-
-        // Render HUD
-        RenderHUD();
-
-        // Debug overlay
-        Debug::StatsOverlay::Instance().Render();
-
-        // renderer.EndFrame();
-    }
-
-    void RenderHUD() {
-        if (!player_) return;
-
-        // Would use UI system to render HUD elements
-        // Health bar
-        // Armor bar
-        // Ammo counter
-        // Crosshair
-        // Wave info
-        // Score
-
-        // Example HUD data:
-        // Health: player_->GetHealth().GetHealth()
-        // Armor: player_->GetArmor()
-        // Ammo: player_->GetCurrentWeapon()->GetAmmoInMagazine() / GetReserveAmmo()
-        // Wave: survival_mode_->GetWaveNumber()
-        // Score: survival_mode_->GetScore()
-    }
-
-    bool running_ = false;
-    Game::Player* player_ = nullptr;
-    Camera::Camera* camera_ = nullptr;
-    Terrain::Terrain* terrain_ = nullptr;
-    SurvivalGameMode* survival_mode_ = nullptr;
-};
-
-int main(int argc, char* argv[]) {
-    FPSDemoApp app;
-
-    if (!app.Initialize()) {
-        return -1;
-    }
-
-    app.Run();
-    app.Shutdown();
-
+    glfwDestroyWindow(window);
+    glfwTerminate();
+    std::cout << "\nGame Over! Score: " << g.pl.score << " Kills: " << g.pl.kills << "\n";
     return 0;
 }

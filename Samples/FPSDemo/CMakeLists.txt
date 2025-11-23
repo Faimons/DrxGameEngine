@@ -1,17 +1,7 @@
 # DRX Engine - FPS Demo Sample
-cmake_minimum_required(VERSION 3.16)
-project(FPSDemo)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-
-# Find DRX Engine
-set(DRX_ENGINE_DIR "${CMAKE_SOURCE_DIR}/../..")
-
-# Include directories
-include_directories(
-    ${DRX_ENGINE_DIR}/Engine/Source
-)
 
 # Source files
 set(SOURCES
@@ -21,18 +11,24 @@ set(SOURCES
 # Create executable
 add_executable(FPSDemo ${SOURCES})
 
-# Link DRX Engine libraries
-target_link_libraries(FPSDemo
-    DRXCore
-    DRXRenderer
-    DRXPhysics
-    DRXAudio
-    DRXInput
-    DRXGame
-    DRXCamera
-    DRXTerrain
-    DRXDebug
-)
+# Include directories
+target_include_directories(FPSDemo PRIVATE ${CMAKE_SOURCE_DIR}/ThirdParty/glfw/include)
+
+# Link GLFW and OpenGL
+if(TARGET glfw)
+    target_link_libraries(FPSDemo PRIVATE glfw)
+endif()
+
+# Link OpenGL and GLU
+if(WIN32)
+    target_link_libraries(FPSDemo PRIVATE opengl32 glu32)
+elseif(APPLE)
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(FPSDemo PRIVATE OpenGL::GL OpenGL::GLU)
+else()
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(FPSDemo PRIVATE OpenGL::GL OpenGL::GLU)
+endif()
 
 # Platform-specific settings
 if(WIN32)
@@ -44,6 +40,7 @@ endif()
 # Copy assets
 add_custom_command(TARGET FPSDemo POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E copy_directory
-    "${DRX_ENGINE_DIR}/Assets"
+    "${CMAKE_SOURCE_DIR}/Assets"
     "$<TARGET_FILE_DIR:FPSDemo>/Assets"
+    COMMENT "Copying assets for FPSDemo..."
 )

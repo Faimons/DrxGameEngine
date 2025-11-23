@@ -84,6 +84,7 @@ endif()
 # Examples
 if(DRX_BUILD_EXAMPLES)
     add_subdirectory(Examples)
+    add_subdirectory(Samples)
 endif()
 
 # Print configuration summary
