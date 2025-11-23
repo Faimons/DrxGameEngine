@@ -14,16 +14,19 @@ if(EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/imgui/imgui.cpp)
         imgui/imgui_tables.cpp
         imgui/imgui_widgets.cpp
         imgui/backends/imgui_impl_glfw.cpp
-        imgui/backends/imgui_impl_vulkan.cpp
+        imgui/backends/imgui_impl_opengl3.cpp
     )
     target_include_directories(imgui PUBLIC
         ${CMAKE_CURRENT_SOURCE_DIR}/imgui
         ${CMAKE_CURRENT_SOURCE_DIR}/imgui/backends
     )
-    target_link_libraries(imgui PUBLIC Vulkan::Vulkan)
+    target_compile_definitions(imgui PUBLIC IMGUI_IMPL_OPENGL_LOADER_CUSTOM)
     if(TARGET glfw)
         target_link_libraries(imgui PUBLIC glfw)
     endif()
+    # Link OpenGL
+    find_package(OpenGL REQUIRED)
+    target_link_libraries(imgui PUBLIC OpenGL::GL)
 endif()
 
 # EnTT - Entity Component System (Header-only)

@@ -1,1187 +1,32 @@
 /**
  * DRX Engine - Visual Editor Implementation
+ * Complete working editor with ImGui, GLFW, and OpenGL3
  */
 
 #include "EditorApp.h"
+
+#include <GLFW/glfw3.h>
+#include <imgui.h>
+#include <imgui_impl_glfw.h>
+#include <imgui_impl_opengl3.h>
+
+#include <iostream>
+#include <fstream>
+#include <sstream>
 #include <algorithm>
 #include <chrono>
 #include <ctime>
-#include <filesystem>
-#include <fstream>
 #include <cstring>
 
-namespace fs = std::filesystem;
+#if __has_include(<filesystem>)
+    #include <filesystem>
+    namespace fs = std::filesystem;
+#else
+    #include <experimental/filesystem>
+    namespace fs = std::experimental::filesystem;
+#endif
 
 namespace DRX::Editor {
-
-// ============================================================================
-// HierarchyPanel Implementation
-// ============================================================================
-
-HierarchyPanel::HierarchyPanel() {
-    name_ = "Hierarchy";
-}
-
-void HierarchyPanel::OnRender() {
-    if (!visible_) return;
-
-    // Fenster Titel mit Icon
-    if (BeginPanel("🌳 Szenen-Hierarchie")) {
-        // Suchfeld
-        static char search_buffer[128] = "";
-        DrawSearchBar(search_buffer, sizeof(search_buffer), "Objekte suchen...");
-
-        Separator();
-
-        // "Neues Objekt" Button
-        if (Button("+ Neues Objekt", {-1, 30})) {
-            if (on_entity_created) on_entity_created();
-        }
-
-        Separator();
-
-        // Entity Liste
-        if (scene_) {
-            for (auto& entity : scene_->entities) {
-                // Filter by search
-                if (strlen(search_buffer) > 0) {
-                    if (entity.name.find(search_buffer) == String::npos) {
-                        continue;
-                    }
-                }
-
-                // Nur Root-Entities (ohne Parent)
-                if (entity.parent_id == 0) {
-                    DrawEntityNode(entity);
-                }
-            }
-        } else {
-            TextDisabled("Keine Szene geladen");
-        }
-
-        // Rechtsklick-Menü
-        DrawContextMenu();
-    }
-    EndPanel();
-}
-
-void HierarchyPanel::DrawEntityNode(Scene::EntityData& entity) {
-    // Flags für den Tree Node
-    int flags = TreeNodeFlags_OpenOnArrow | TreeNodeFlags_SpanAvailWidth;
-
-    if (selected_entity_ && selected_entity_->id == entity.id) {
-        flags |= TreeNodeFlags_Selected;
-    }
-
-    // Prüfe ob Entity Kinder hat
-    bool has_children = false;
-    if (scene_) {
-        for (const auto& e : scene_->entities) {
-            if (e.parent_id == entity.id) {
-                has_children = true;
-                break;
-            }
-        }
-    }
-
-    if (!has_children) {
-        flags |= TreeNodeFlags_Leaf;
-    }
-
-    // Icon basierend auf Entity-Typ
-    String label = GetEntityIcon(entity) + " " + entity.name;
-
-    bool is_open = TreeNodeEx(entity.id, flags, label.c_str());
-
-    // Klick-Handling
-    if (IsItemClicked()) {
-        selected_entity_ = &entity;
-        if (on_entity_selected) {
-            on_entity_selected(&entity);
-        }
-    }
-
-    // Drag & Drop
-    if (BeginDragDropSource()) {
-        dragged_entity_id_ = entity.id;
-        SetDragDropPayload("ENTITY", &entity.id, sizeof(uint64));
-        Text("📦 %s", entity.name.c_str());
-        EndDragDropSource();
-    }
-
-    if (BeginDragDropTarget()) {
-        if (const void* payload = AcceptDragDropPayload("ENTITY")) {
-            uint64 dropped_id = *(const uint64*)payload;
-            // Setze Parent
-            if (scene_) {
-                for (auto& e : scene_->entities) {
-                    if (e.id == dropped_id) {
-                        e.parent_id = entity.id;
-                        break;
-                    }
-                }
-            }
-        }
-        EndDragDropTarget();
-    }
-
-    // Kinder zeichnen
-    if (is_open) {
-        if (scene_) {
-            for (auto& child : scene_->entities) {
-                if (child.parent_id == entity.id) {
-                    DrawEntityNode(child);
-                }
-            }
-        }
-        TreePop();
-    }
-}
-
-void HierarchyPanel::DrawContextMenu() {
-    if (BeginPopupContextWindow("HierarchyContextMenu")) {
-        if (MenuItem("🆕 Leeres Objekt erstellen")) {
-            if (on_entity_created) on_entity_created();
-        }
-
-        Separator();
-
-        if (MenuItem("📦 Würfel")) {
-            // Create cube
-        }
-        if (MenuItem("⚽ Kugel")) {
-            // Create sphere
-        }
-        if (MenuItem("🟫 Ebene")) {
-            // Create plane
-        }
-
-        Separator();
-
-        if (MenuItem("💡 Licht")) {
-            // Create light
-        }
-        if (MenuItem("📷 Kamera")) {
-            // Create camera
-        }
-
-        Separator();
-
-        if (selected_entity_) {
-            if (MenuItem("📋 Kopieren")) {}
-            if (MenuItem("📄 Duplizieren")) {}
-            if (MenuItem("🗑️ Löschen")) {
-                if (on_entity_deleted) {
-                    on_entity_deleted(selected_entity_->id);
-                }
-            }
-        }
-
-        EndPopup();
-    }
-}
-
-String HierarchyPanel::GetEntityIcon(const Scene::EntityData& entity) {
-    // Prüfe Komponenten für passendes Icon
-    for (const auto& comp : entity.components) {
-        if (comp.type == "Camera") return "📷";
-        if (comp.type == "Light") return "💡";
-        if (comp.type == "MeshRenderer") return "🎨";
-        if (comp.type == "AudioSource") return "🔊";
-        if (comp.type == "RigidBody") return "⚙️";
-        if (comp.type == "Script") return "📜";
-    }
-    return "📦";  // Default
-}
-
-// ============================================================================
-// InspectorPanel Implementation
-// ============================================================================
-
-InspectorPanel::InspectorPanel() {
-    name_ = "Inspector";
-}
-
-void InspectorPanel::OnRender() {
-    if (!visible_) return;
-
-    if (BeginPanel("🔍 Inspector")) {
-        if (entity_) {
-            // Entity Name
-            char name_buffer[128];
-            strncpy(name_buffer, entity_->name.c_str(), sizeof(name_buffer) - 1);
-            name_buffer[sizeof(name_buffer) - 1] = '\0';
-
-            Text("Name:");
-            SameLine();
-            if (InputText("##EntityName", name_buffer, sizeof(name_buffer))) {
-                entity_->name = name_buffer;
-            }
-
-            // Enabled Checkbox
-            Checkbox("Aktiv", &entity_->enabled);
-
-            // Tags
-            Text("Tags: ");
-            SameLine();
-            for (const auto& tag : entity_->tags) {
-                SameLine();
-                SmallButton(tag.c_str());
-            }
-            SameLine();
-            if (SmallButton("+")) {
-                // Add tag dialog
-            }
-
-            Separator();
-
-            // Transform Component (immer vorhanden)
-            DrawTransformComponent();
-
-            Separator();
-
-            // Andere Komponenten
-            DrawComponents();
-
-            Separator();
-
-            // Add Component Button
-            DrawAddComponentButton();
-        } else {
-            TextDisabled("Kein Objekt ausgewählt");
-            Text("");
-            Text("Wähle ein Objekt in der");
-            Text("Hierarchie aus um seine");
-            Text("Eigenschaften zu bearbeiten.");
-        }
-    }
-    EndPanel();
-}
-
-void InspectorPanel::DrawTransformComponent() {
-    if (!entity_) return;
-
-    if (CollapsingHeader("📐 Transform", TreeNodeFlags_DefaultOpen)) {
-        // Position
-        Text("Position");
-        float pos[3] = {entity_->transform.position.x,
-                        entity_->transform.position.y,
-                        entity_->transform.position.z};
-        if (DragFloat3("##Position", pos, 0.1f)) {
-            entity_->transform.position = {pos[0], pos[1], pos[2]};
-        }
-
-        // Rotation (als Euler-Winkel anzeigen)
-        Text("Rotation");
-        Math::Vector3 euler = entity_->transform.rotation.ToEuler();
-        float rot[3] = {euler.x, euler.y, euler.z};
-        if (DragFloat3("##Rotation", rot, 1.0f)) {
-            entity_->transform.rotation = Math::Quaternion::FromEuler({rot[0], rot[1], rot[2]});
-        }
-
-        // Scale
-        Text("Skalierung");
-        float scale[3] = {entity_->transform.scale.x,
-                          entity_->transform.scale.y,
-                          entity_->transform.scale.z};
-        if (DragFloat3("##Scale", scale, 0.1f)) {
-            entity_->transform.scale = {scale[0], scale[1], scale[2]};
-        }
-
-        // Reset Button
-        if (Button("Zurücksetzen")) {
-            entity_->transform.position = Math::Vector3::Zero;
-            entity_->transform.rotation = Math::Quaternion::Identity;
-            entity_->transform.scale = Math::Vector3::One;
-        }
-    }
-}
-
-void InspectorPanel::DrawComponents() {
-    if (!entity_) return;
-
-    for (size_t i = 0; i < entity_->components.size(); ++i) {
-        auto& component = entity_->components[i];
-
-        String header = GetComponentIcon(component.type) + " " + component.type;
-
-        bool remove_component = false;
-
-        // Component Header mit Options
-        if (CollapsingHeader(header.c_str(), TreeNodeFlags_DefaultOpen)) {
-            // Enabled Checkbox
-            Checkbox(("##Enabled" + std::to_string(i)).c_str(), &component.enabled);
-            SameLine();
-            Text("Aktiviert");
-
-            // Component-spezifische UI
-            DrawComponentUI(component);
-
-            // Remove Button
-            if (Button(("Entfernen##" + std::to_string(i)).c_str())) {
-                remove_component = true;
-            }
-        }
-
-        if (remove_component) {
-            entity_->components.erase(entity_->components.begin() + i);
-            break;
-        }
-    }
-}
-
-void InspectorPanel::DrawComponentUI(Scene::ComponentData& component) {
-    // Je nach Komponenten-Typ verschiedene UI
-    if (component.type == "MeshRenderer") {
-        Text("Mesh:");
-        // Mesh Auswahl
-        if (Button("Mesh auswählen...")) {
-            // Open asset picker
-        }
-        Text("Material:");
-        if (Button("Material auswählen...")) {
-            // Open asset picker
-        }
-    }
-    else if (component.type == "Camera") {
-        static float fov = 60.0f;
-        static float near_plane = 0.1f;
-        static float far_plane = 1000.0f;
-
-        SliderFloat("Sichtfeld (FOV)", &fov, 30.0f, 120.0f);
-        DragFloat("Nahe Ebene", &near_plane, 0.01f, 0.01f, 10.0f);
-        DragFloat("Ferne Ebene", &far_plane, 1.0f, 10.0f, 10000.0f);
-    }
-    else if (component.type == "Light") {
-        static int light_type = 0;
-        static float color[3] = {1, 1, 1};
-        static float intensity = 1.0f;
-
-        const char* types[] = {"Directional", "Point", "Spot"};
-        Combo("Typ", &light_type, types, 3);
-        ColorEdit3("Farbe", color);
-        SliderFloat("Intensität", &intensity, 0.0f, 10.0f);
-    }
-    else if (component.type == "RigidBody") {
-        static float mass = 1.0f;
-        static bool use_gravity = true;
-        static bool is_kinematic = false;
-
-        DragFloat("Masse", &mass, 0.1f, 0.0f, 1000.0f);
-        Checkbox("Schwerkraft", &use_gravity);
-        Checkbox("Kinematisch", &is_kinematic);
-    }
-    else if (component.type == "AudioSource") {
-        Text("Audio Clip:");
-        if (Button("Audio auswählen...")) {}
-
-        static float volume = 1.0f;
-        static bool loop = false;
-        static bool play_on_start = false;
-
-        SliderFloat("Lautstärke", &volume, 0.0f, 1.0f);
-        Checkbox("Wiederholen", &loop);
-        Checkbox("Auto-Play", &play_on_start);
-    }
-    else if (component.type == "Script") {
-        Text("Script Datei:");
-        if (Button("Script auswählen...")) {}
-    }
-}
-
-void InspectorPanel::DrawAddComponentButton() {
-    if (Button("+ Komponente hinzufügen", {-1, 35})) {
-        OpenPopup("AddComponentPopup");
-    }
-
-    if (BeginPopup("AddComponentPopup")) {
-        Text("Komponente auswählen:");
-        Separator();
-
-        if (MenuItem("🎨 Mesh Renderer")) {
-            AddComponent("MeshRenderer");
-        }
-        if (MenuItem("📷 Kamera")) {
-            AddComponent("Camera");
-        }
-        if (MenuItem("💡 Licht")) {
-            AddComponent("Light");
-        }
-        if (MenuItem("⚙️ Rigidbody (Physik)")) {
-            AddComponent("RigidBody");
-        }
-        if (MenuItem("🔊 Audio Source")) {
-            AddComponent("AudioSource");
-        }
-        if (MenuItem("📜 Script")) {
-            AddComponent("Script");
-        }
-        if (MenuItem("🎬 Animator")) {
-            AddComponent("Animator");
-        }
-        if (MenuItem("💥 Partikel System")) {
-            AddComponent("ParticleSystem");
-        }
-
-        EndPopup();
-    }
-}
-
-void InspectorPanel::AddComponent(const String& type) {
-    if (!entity_) return;
-
-    Scene::ComponentData comp;
-    comp.type = type;
-    comp.enabled = true;
-    entity_->components.push_back(comp);
-}
-
-String InspectorPanel::GetComponentIcon(const String& type) {
-    if (type == "MeshRenderer") return "🎨";
-    if (type == "Camera") return "📷";
-    if (type == "Light") return "💡";
-    if (type == "RigidBody") return "⚙️";
-    if (type == "AudioSource") return "🔊";
-    if (type == "Script") return "📜";
-    if (type == "Animator") return "🎬";
-    if (type == "ParticleSystem") return "💥";
-    return "📦";
-}
-
-// ============================================================================
-// AssetBrowserPanel Implementation
-// ============================================================================
-
-AssetBrowserPanel::AssetBrowserPanel() {
-    name_ = "Assets";
-}
-
-void AssetBrowserPanel::OnRender() {
-    if (!visible_) return;
-
-    if (BeginPanel("📁 Asset Browser")) {
-        DrawPathBar();
-        Separator();
-
-        // Toolbar
-        if (Button("⬅️")) {
-            // Go back
-            if (current_path_ != root_path_ && !path_history_.empty()) {
-                current_path_ = fs::path(current_path_).parent_path().string();
-                Refresh();
-            }
-        }
-        SameLine();
-        if (Button("🔄")) {
-            Refresh();
-        }
-        SameLine();
-        if (Button("📁+")) {
-            // Create folder
-        }
-
-        SliderFloat("Icon Größe", &icon_size_, 40.0f, 150.0f);
-
-        Separator();
-
-        DrawAssetGrid();
-    }
-    EndPanel();
-}
-
-void AssetBrowserPanel::SetRootPath(const String& path) {
-    root_path_ = path;
-    current_path_ = path;
-    Refresh();
-}
-
-void AssetBrowserPanel::Refresh() {
-    current_items_.clear();
-    ScanDirectory(current_path_);
-}
-
-void AssetBrowserPanel::ScanDirectory(const String& path) {
-    if (!fs::exists(path)) return;
-
-    for (const auto& entry : fs::directory_iterator(path)) {
-        AssetItem item;
-        item.path = entry.path().string();
-        item.name = entry.path().filename().string();
-        item.is_directory = entry.is_directory();
-
-        if (item.is_directory) {
-            item.type = AssetItem::Type::Folder;
-        } else {
-            item.extension = entry.path().extension().string();
-            item.size = entry.file_size();
-            item.type = GetAssetType(item.extension);
-        }
-
-        current_items_.push_back(item);
-    }
-
-    // Sortieren: Ordner zuerst, dann alphabetisch
-    std::sort(current_items_.begin(), current_items_.end(),
-        [](const AssetItem& a, const AssetItem& b) {
-            if (a.is_directory != b.is_directory) {
-                return a.is_directory;
-            }
-            return a.name < b.name;
-        });
-}
-
-void AssetBrowserPanel::DrawPathBar() {
-    Text("📍 ");
-    SameLine();
-
-    // Pfad als klickbare Breadcrumbs
-    fs::path p(current_path_);
-    String accumulated;
-
-    for (const auto& part : p) {
-        if (accumulated.empty()) {
-            accumulated = part.string();
-        } else {
-            accumulated += "/" + part.string();
-        }
-
-        if (SmallButton(part.string().c_str())) {
-            current_path_ = accumulated;
-            Refresh();
-        }
-        SameLine();
-        Text("/");
-        SameLine();
-    }
-    NewLine();
-}
-
-void AssetBrowserPanel::DrawAssetGrid() {
-    float panel_width = GetContentRegionAvail().x;
-    int columns = std::max(1, (int)(panel_width / (icon_size_ + 10)));
-
-    BeginChild("AssetGrid");
-
-    int column = 0;
-    for (size_t i = 0; i < current_items_.size(); ++i) {
-        DrawAssetItem(current_items_[i], static_cast<int>(i));
-
-        column++;
-        if (column < columns) {
-            SameLine();
-        } else {
-            column = 0;
-        }
-    }
-
-    EndChild();
-}
-
-void AssetBrowserPanel::DrawAssetItem(const AssetItem& item, int index) {
-    bool is_selected = (index == selected_index_);
-
-    BeginGroup();
-
-    // Icon Button
-    PushStyleColor(StyleColor_Button,
-        is_selected ? Vec4(0.3f, 0.5f, 0.8f, 1.0f) : Vec4(0.2f, 0.2f, 0.2f, 1.0f));
-
-    if (Button((GetAssetIcon(item.type) + String("##") + std::to_string(index)).c_str(),
-               {icon_size_, icon_size_})) {
-        selected_index_ = index;
-        if (on_asset_selected) {
-            on_asset_selected(item);
-        }
-    }
-
-    PopStyleColor();
-
-    // Doppelklick
-    if (IsItemHovered() && IsMouseDoubleClicked(0)) {
-        if (item.is_directory) {
-            current_path_ = item.path;
-            Refresh();
-        } else {
-            if (on_asset_double_clicked) {
-                on_asset_double_clicked(item);
-            }
-        }
-    }
-
-    // Drag & Drop Source
-    if (BeginDragDropSource()) {
-        SetDragDropPayload("ASSET", item.path.c_str(), item.path.size() + 1);
-        Text("%s %s", GetAssetIcon(item.type), item.name.c_str());
-        EndDragDropSource();
-    }
-
-    // Name (gekürzt wenn zu lang)
-    String display_name = item.name;
-    if (display_name.length() > 12) {
-        display_name = display_name.substr(0, 10) + "...";
-    }
-    Text("%s", display_name.c_str());
-
-    EndGroup();
-}
-
-AssetItem::Type AssetBrowserPanel::GetAssetType(const String& ext) {
-    String lower_ext = ext;
-    std::transform(lower_ext.begin(), lower_ext.end(), lower_ext.begin(), ::tolower);
-
-    if (lower_ext == ".png" || lower_ext == ".jpg" || lower_ext == ".jpeg" ||
-        lower_ext == ".tga" || lower_ext == ".bmp") {
-        return AssetItem::Type::Texture;
-    }
-    if (lower_ext == ".obj" || lower_ext == ".fbx" || lower_ext == ".gltf" ||
-        lower_ext == ".glb" || lower_ext == ".dae") {
-        return AssetItem::Type::Model;
-    }
-    if (lower_ext == ".wav" || lower_ext == ".mp3" || lower_ext == ".ogg") {
-        return AssetItem::Type::Audio;
-    }
-    if (lower_ext == ".lua" || lower_ext == ".py" || lower_ext == ".cpp") {
-        return AssetItem::Type::Script;
-    }
-    if (lower_ext == ".drxscene") {
-        return AssetItem::Type::Scene;
-    }
-    if (lower_ext == ".drxprefab") {
-        return AssetItem::Type::Prefab;
-    }
-    if (lower_ext == ".vert" || lower_ext == ".frag" || lower_ext == ".glsl") {
-        return AssetItem::Type::Shader;
-    }
-    if (lower_ext == ".drxmat") {
-        return AssetItem::Type::Material;
-    }
-
-    return AssetItem::Type::Unknown;
-}
-
-const char* AssetBrowserPanel::GetAssetIcon(AssetItem::Type type) {
-    switch (type) {
-        case AssetItem::Type::Folder: return "📁";
-        case AssetItem::Type::Texture: return "🖼️";
-        case AssetItem::Type::Model: return "🎭";
-        case AssetItem::Type::Audio: return "🔊";
-        case AssetItem::Type::Script: return "📜";
-        case AssetItem::Type::Scene: return "🎬";
-        case AssetItem::Type::Prefab: return "📦";
-        case AssetItem::Type::Shader: return "✨";
-        case AssetItem::Type::Material: return "🎨";
-        default: return "📄";
-    }
-}
-
-// ============================================================================
-// ViewportPanel Implementation
-// ============================================================================
-
-ViewportPanel::ViewportPanel() {
-    name_ = "Viewport";
-}
-
-void ViewportPanel::OnUpdate(float32 delta_time) {
-    if (is_focused_) {
-        HandleCameraInput(delta_time);
-    }
-}
-
-void ViewportPanel::OnRender() {
-    if (!visible_) return;
-
-    PushStyleVar(StyleVar_WindowPadding, Vec2(0, 0));
-
-    if (BeginPanel("🎮 Viewport")) {
-        DrawToolbar();
-
-        // Viewport größe
-        Vec2 size = GetContentRegionAvail();
-        viewport_size_ = {size.x, size.y};
-
-        // Render das Bild
-        if (render_texture_) {
-            Image(render_texture_, size);
-        } else {
-            // Platzhalter
-            DrawRect(GetCursorScreenPos(),
-                     {GetCursorScreenPos().x + size.x, GetCursorScreenPos().y + size.y},
-                     Vec4(0.1f, 0.1f, 0.15f, 1.0f));
-
-            // Zentrierter Text
-            Vec2 text_size = CalcTextSize("3D Ansicht wird geladen...");
-            SetCursorPos({(size.x - text_size.x) / 2, (size.y - text_size.y) / 2});
-            Text("3D Ansicht wird geladen...");
-        }
-
-        // Prüfe ob Viewport fokussiert ist
-        is_focused_ = IsWindowFocused();
-        is_hovered_ = IsWindowHovered();
-
-        // Gizmos zeichnen
-        if (is_hovered_) {
-            DrawGizmos();
-        }
-    }
-    EndPanel();
-
-    PopStyleVar();
-}
-
-void ViewportPanel::DrawToolbar() {
-    // Gizmo Mode Buttons
-    PushStyleVar(StyleVar_FrameRounding, 3.0f);
-
-    if (RadioButton("↔️", gizmo_mode_ == GizmoMode::Translate)) {
-        gizmo_mode_ = GizmoMode::Translate;
-    }
-    if (IsItemHovered()) SetTooltip("Verschieben (W)");
-
-    SameLine();
-    if (RadioButton("🔄", gizmo_mode_ == GizmoMode::Rotate)) {
-        gizmo_mode_ = GizmoMode::Rotate;
-    }
-    if (IsItemHovered()) SetTooltip("Rotieren (E)");
-
-    SameLine();
-    if (RadioButton("⬛", gizmo_mode_ == GizmoMode::Scale)) {
-        gizmo_mode_ = GizmoMode::Scale;
-    }
-    if (IsItemHovered()) SetTooltip("Skalieren (R)");
-
-    SameLine();
-    Separator();
-    SameLine();
-
-    // Kamera Info
-    Text("📷 Pos: %.1f, %.1f, %.1f",
-         camera_position_.x, camera_position_.y, camera_position_.z);
-
-    PopStyleVar();
-
-    Separator();
-}
-
-void ViewportPanel::HandleCameraInput(float32 delta_time) {
-    // Rechte Maustaste für Kamera-Rotation
-    if (IsMouseDown(1) && is_hovered_) {
-        Vec2 delta = GetMouseDragDelta(1);
-        camera_rotation_.y += delta.x * camera_sensitivity_;
-        camera_rotation_.x += delta.y * camera_sensitivity_;
-        camera_rotation_.x = std::clamp(camera_rotation_.x, -89.0f, 89.0f);
-        ResetMouseDragDelta(1);
-    }
-
-    // WASD für Bewegung
-    if (is_focused_) {
-        Math::Vector3 move_dir = Math::Vector3::Zero;
-
-        float rad = camera_rotation_.y * 3.14159265359f / 180.0f;
-        Math::Vector3 forward = {sin(rad), 0, cos(rad)};
-        Math::Vector3 right = {cos(rad), 0, -sin(rad)};
-
-        if (IsKeyDown(Key_W)) move_dir = move_dir + forward;
-        if (IsKeyDown(Key_S)) move_dir = move_dir - forward;
-        if (IsKeyDown(Key_A)) move_dir = move_dir - right;
-        if (IsKeyDown(Key_D)) move_dir = move_dir + right;
-        if (IsKeyDown(Key_E)) move_dir.y += 1.0f;
-        if (IsKeyDown(Key_Q)) move_dir.y -= 1.0f;
-
-        float speed = camera_speed_;
-        if (IsKeyDown(Key_LeftShift)) speed *= 3.0f;
-
-        camera_position_ = camera_position_ + move_dir * speed * delta_time;
-    }
-
-    // Mausrad für Zoom
-    float scroll = GetMouseWheel();
-    if (scroll != 0 && is_hovered_) {
-        float rad = camera_rotation_.y * 3.14159265359f / 180.0f;
-        Math::Vector3 forward = {sin(rad), 0, cos(rad)};
-        camera_position_ = camera_position_ + forward * scroll * 2.0f;
-    }
-}
-
-void ViewportPanel::DrawGizmos() {
-    // Gizmo-Zeichnung würde hier implementiert
-    // Für echte Implementierung würde man ImGuizmo verwenden
-}
-
-void ViewportPanel::DrawGrid() {
-    // Grid-Zeichnung
-}
-
-// ============================================================================
-// ConsolePanel Implementation
-// ============================================================================
-
-ConsolePanel::ConsolePanel() {
-    name_ = "Console";
-}
-
-ConsolePanel& ConsolePanel::Instance() {
-    static ConsolePanel instance;
-    return instance;
-}
-
-void ConsolePanel::OnRender() {
-    if (!visible_) return;
-
-    if (BeginPanel("📋 Console")) {
-        DrawToolbar();
-        Separator();
-        DrawMessages();
-        Separator();
-        DrawInputField();
-    }
-    EndPanel();
-}
-
-void ConsolePanel::AddLog(ConsoleMessage::Level level, const String& message) {
-    // Timestamp
-    auto now = std::chrono::system_clock::now();
-    auto time = std::chrono::system_clock::to_time_t(now);
-    char timestamp[32];
-    strftime(timestamp, sizeof(timestamp), "%H:%M:%S", localtime(&time));
-
-    // Prüfe ob letzte Nachricht gleich ist (zusammenfassen)
-    if (!messages_.empty() &&
-        messages_.back().level == level &&
-        messages_.back().message == message) {
-        messages_.back().count++;
-    } else {
-        messages_.push_back({level, message, timestamp, 1});
-    }
-
-    scroll_to_bottom_ = true;
-}
-
-void ConsolePanel::Clear() {
-    messages_.clear();
-}
-
-void ConsolePanel::DrawToolbar() {
-    if (Button("🗑️ Leeren")) {
-        Clear();
-    }
-    SameLine();
-
-    Checkbox("ℹ️", &show_info_);
-    if (IsItemHovered()) SetTooltip("Info anzeigen");
-    SameLine();
-
-    Checkbox("⚠️", &show_warnings_);
-    if (IsItemHovered()) SetTooltip("Warnungen anzeigen");
-    SameLine();
-
-    Checkbox("❌", &show_errors_);
-    if (IsItemHovered()) SetTooltip("Fehler anzeigen");
-
-    SameLine();
-    Text("  |  %zu Nachrichten", messages_.size());
-}
-
-void ConsolePanel::DrawMessages() {
-    BeginChild("ConsoleMessages", {0, -30}, true);
-
-    for (const auto& msg : messages_) {
-        // Filter
-        if (msg.level == ConsoleMessage::Level::Info && !show_info_) continue;
-        if (msg.level == ConsoleMessage::Level::Warning && !show_warnings_) continue;
-        if (msg.level == ConsoleMessage::Level::Error && !show_errors_) continue;
-
-        // Farbe je nach Level
-        Vec4 color;
-        const char* icon;
-        switch (msg.level) {
-            case ConsoleMessage::Level::Info:
-                color = Vec4(0.8f, 0.8f, 0.8f, 1.0f);
-                icon = "ℹ️";
-                break;
-            case ConsoleMessage::Level::Warning:
-                color = Vec4(1.0f, 0.8f, 0.2f, 1.0f);
-                icon = "⚠️";
-                break;
-            case ConsoleMessage::Level::Error:
-                color = Vec4(1.0f, 0.3f, 0.3f, 1.0f);
-                icon = "❌";
-                break;
-            case ConsoleMessage::Level::Debug:
-                color = Vec4(0.5f, 0.5f, 1.0f, 1.0f);
-                icon = "🔧";
-                break;
-        }
-
-        TextColored(color, "[%s] %s %s", msg.timestamp.c_str(), icon, msg.message.c_str());
-
-        if (msg.count > 1) {
-            SameLine();
-            Text("(x%d)", msg.count);
-        }
-    }
-
-    if (scroll_to_bottom_) {
-        SetScrollHereY(1.0f);
-        scroll_to_bottom_ = false;
-    }
-
-    EndChild();
-}
-
-void ConsolePanel::DrawInputField() {
-    PushItemWidth(-60);
-    if (InputText("##ConsoleInput", input_buffer_, sizeof(input_buffer_),
-                  InputTextFlags_EnterReturnsTrue)) {
-        ExecuteCommand(input_buffer_);
-        input_buffer_[0] = '\0';
-    }
-    PopItemWidth();
-
-    SameLine();
-    if (Button("Senden")) {
-        ExecuteCommand(input_buffer_);
-        input_buffer_[0] = '\0';
-    }
-}
-
-void ConsolePanel::ExecuteCommand(const String& command) {
-    if (command.empty()) return;
-
-    AddLog(ConsoleMessage::Level::Info, "> " + command);
-
-    // Einfache Befehle
-    if (command == "help") {
-        AddLog(ConsoleMessage::Level::Info, "Verfügbare Befehle:");
-        AddLog(ConsoleMessage::Level::Info, "  help - Diese Hilfe");
-        AddLog(ConsoleMessage::Level::Info, "  clear - Console leeren");
-        AddLog(ConsoleMessage::Level::Info, "  version - Version anzeigen");
-    }
-    else if (command == "clear") {
-        Clear();
-    }
-    else if (command == "version") {
-        AddLog(ConsoleMessage::Level::Info, "DRX Engine v1.0.0");
-    }
-    else {
-        AddLog(ConsoleMessage::Level::Warning, "Unbekannter Befehl: " + command);
-    }
-}
-
-// ============================================================================
-// MainMenu Implementation
-// ============================================================================
-
-void MainMenu::OnRender() {
-    if (BeginMainMenuBar()) {
-        DrawFileMenu();
-        DrawEditMenu();
-        DrawGameObjectMenu();
-        DrawWindowMenu();
-        DrawHelpMenu();
-        EndMainMenuBar();
-    }
-}
-
-void MainMenu::DrawFileMenu() {
-    if (BeginMenu("📁 Datei")) {
-        if (MenuItem("🆕 Neue Szene", "Ctrl+N")) {
-            if (on_new_scene) on_new_scene();
-        }
-        if (MenuItem("📂 Szene öffnen...", "Ctrl+O")) {
-            if (on_open_scene) on_open_scene();
-        }
-
-        Separator();
-
-        if (MenuItem("💾 Speichern", "Ctrl+S")) {
-            if (on_save_scene) on_save_scene();
-        }
-        if (MenuItem("💾 Speichern als...", "Ctrl+Shift+S")) {
-            if (on_save_scene_as) on_save_scene_as();
-        }
-
-        Separator();
-
-        if (MenuItem("🚪 Beenden", "Alt+F4")) {
-            if (on_exit) on_exit();
-        }
-
-        EndMenu();
-    }
-}
-
-void MainMenu::DrawEditMenu() {
-    if (BeginMenu("✏️ Bearbeiten")) {
-        if (MenuItem("↩️ Rückgängig", "Ctrl+Z")) {
-            if (on_undo) on_undo();
-        }
-        if (MenuItem("↪️ Wiederholen", "Ctrl+Y")) {
-            if (on_redo) on_redo();
-        }
-
-        Separator();
-
-        if (MenuItem("📋 Kopieren", "Ctrl+C")) {
-            if (on_copy) on_copy();
-        }
-        if (MenuItem("📄 Einfügen", "Ctrl+V")) {
-            if (on_paste) on_paste();
-        }
-        if (MenuItem("📑 Duplizieren", "Ctrl+D")) {
-            if (on_duplicate) on_duplicate();
-        }
-
-        Separator();
-
-        if (MenuItem("🗑️ Löschen", "Delete")) {
-            if (on_delete) on_delete();
-        }
-
-        EndMenu();
-    }
-}
-
-void MainMenu::DrawGameObjectMenu() {
-    if (BeginMenu("🎮 Objekte")) {
-        if (MenuItem("📦 Leeres Objekt")) {
-            if (on_create_empty) on_create_empty();
-        }
-
-        Separator();
-
-        if (BeginMenu("🔷 3D Objekte")) {
-            if (MenuItem("📦 Würfel")) {
-                if (on_create_cube) on_create_cube();
-            }
-            if (MenuItem("⚽ Kugel")) {
-                if (on_create_sphere) on_create_sphere();
-            }
-            if (MenuItem("🟫 Ebene")) {
-                if (on_create_plane) on_create_plane();
-            }
-            EndMenu();
-        }
-
-        Separator();
-
-        if (MenuItem("💡 Licht")) {
-            if (on_create_light) on_create_light();
-        }
-        if (MenuItem("📷 Kamera")) {
-            if (on_create_camera) on_create_camera();
-        }
-
-        EndMenu();
-    }
-}
-
-void MainMenu::DrawWindowMenu() {
-    if (BeginMenu("🪟 Fenster")) {
-        if (MenuItem("🌳 Hierarchie", nullptr, &show_hierarchy_)) {
-            if (on_toggle_hierarchy) on_toggle_hierarchy(show_hierarchy_);
-        }
-        if (MenuItem("🔍 Inspector", nullptr, &show_inspector_)) {
-            if (on_toggle_inspector) on_toggle_inspector(show_inspector_);
-        }
-        if (MenuItem("📁 Asset Browser", nullptr, &show_asset_browser_)) {
-            if (on_toggle_asset_browser) on_toggle_asset_browser(show_asset_browser_);
-        }
-        if (MenuItem("📋 Console", nullptr, &show_console_)) {
-            if (on_toggle_console) on_toggle_console(show_console_);
-        }
-
-        EndMenu();
-    }
-}
-
-void MainMenu::DrawHelpMenu() {
-    if (BeginMenu("❓ Hilfe")) {
-        if (MenuItem("📖 Dokumentation")) {
-            // Open docs
-        }
-        if (MenuItem("🎓 Tutorial")) {
-            // Open tutorial
-        }
-
-        Separator();
-
-        if (MenuItem("ℹ️ Über DRX Engine")) {
-            // Show about dialog
-        }
-
-        EndMenu();
-    }
-}
-
-// ============================================================================
-// Toolbar Implementation
-// ============================================================================
-
-void Toolbar::OnRender() {
-    PushStyleVar(StyleVar_WindowPadding, Vec2(8, 4));
-
-    BeginChild("Toolbar", {0, 40}, true);
-
-    // Play/Pause/Stop Buttons
-    if (!is_playing_) {
-        if (Button("▶️ Play", {80, 28})) {
-            is_playing_ = true;
-            is_paused_ = false;
-            if (on_play) on_play();
-        }
-    } else {
-        if (is_paused_) {
-            if (Button("▶️ Weiter", {80, 28})) {
-                is_paused_ = false;
-                if (on_play) on_play();
-            }
-        } else {
-            if (Button("⏸️ Pause", {80, 28})) {
-                is_paused_ = true;
-                if (on_pause) on_pause();
-            }
-        }
-    }
-
-    SameLine();
-
-    bool can_stop = is_playing_;
-    if (!can_stop) BeginDisabled();
-    if (Button("⏹️ Stop", {80, 28})) {
-        is_playing_ = false;
-        is_paused_ = false;
-        if (on_stop) on_stop();
-    }
-    if (!can_stop) EndDisabled();
-
-    SameLine();
-
-    if (!is_playing_) BeginDisabled();
-    if (Button("⏭️ Step", {80, 28})) {
-        if (on_step) on_step();
-    }
-    if (!is_playing_) EndDisabled();
-
-    // Status
-    SameLine();
-    Separator();
-    SameLine();
-
-    if (is_playing_) {
-        if (is_paused_) {
-            TextColored(Vec4(1.0f, 0.8f, 0.2f, 1.0f), "⏸️ PAUSIERT");
-        } else {
-            TextColored(Vec4(0.3f, 1.0f, 0.3f, 1.0f), "▶️ LÄUFT");
-        }
-    } else {
-        TextColored(Vec4(0.6f, 0.6f, 0.6f, 1.0f), "⏹️ EDITOR MODUS");
-    }
-
-    EndChild();
-
-    PopStyleVar();
-}
 
 // ============================================================================
 // EditorApplication Implementation
@@ -1195,179 +40,1007 @@ EditorApplication& EditorApplication::Instance() {
 bool EditorApplication::Initialize(const EditorConfig& config) {
     config_ = config;
 
-    EDITOR_LOG("DRX Engine Editor wird gestartet...");
+    if (!InitWindow()) {
+        std::cerr << "Failed to initialize window\n";
+        return false;
+    }
 
-    // UI Panels erstellen
-    hierarchy_panel_ = std::make_unique<HierarchyPanel>();
-    inspector_panel_ = std::make_unique<InspectorPanel>();
-    asset_browser_panel_ = std::make_unique<AssetBrowserPanel>();
-    viewport_panel_ = std::make_unique<ViewportPanel>();
-    console_panel_ = std::make_unique<ConsolePanel>();
-    main_menu_ = std::make_unique<MainMenu>();
-    toolbar_ = std::make_unique<Toolbar>();
+    if (!InitImGui()) {
+        std::cerr << "Failed to initialize ImGui\n";
+        return false;
+    }
 
-    SetupCallbacks();
-
-    // Neue Szene erstellen
+    // Create default scene
     NewScene();
 
-    // Asset Browser Pfad setzen
-    asset_browser_panel_->SetRootPath("./Assets");
+    // Create Assets directory if it doesn't exist
+    if (!fs::exists(asset_root_path_)) {
+        fs::create_directories(asset_root_path_);
+    }
+    ScanDirectory(asset_current_path_);
 
-    EDITOR_LOG("Editor erfolgreich initialisiert!");
+    Log("DRX Engine Editor initialized");
+    Log("Welcome to DRX Engine!");
 
     running_ = true;
     return true;
 }
 
+bool EditorApplication::InitWindow() {
+    if (!glfwInit()) {
+        return false;
+    }
+
+    // OpenGL 3.3 Core
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 3);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 3);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
+    glfwWindowHint(GLFW_MAXIMIZED, GLFW_TRUE);
+
+    window_ = glfwCreateWindow(
+        config_.window_width,
+        config_.window_height,
+        config_.window_title.c_str(),
+        nullptr, nullptr
+    );
+
+    if (!window_) {
+        glfwTerminate();
+        return false;
+    }
+
+    glfwMakeContextCurrent(window_);
+    glfwSwapInterval(config_.vsync ? 1 : 0);
+
+    return true;
+}
+
+bool EditorApplication::InitImGui() {
+    IMGUI_CHECKVERSION();
+    ImGui::CreateContext();
+
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+
+    // Dark theme
+    if (config_.dark_mode) {
+        ImGui::StyleColorsDark();
+        ImGuiStyle& style = ImGui::GetStyle();
+        style.WindowRounding = 5.0f;
+        style.FrameRounding = 3.0f;
+        style.GrabRounding = 3.0f;
+        style.TabRounding = 3.0f;
+
+        // Custom colors
+        auto& colors = style.Colors;
+        colors[ImGuiCol_WindowBg] = ImVec4(0.1f, 0.1f, 0.13f, 1.0f);
+        colors[ImGuiCol_Header] = ImVec4(0.2f, 0.2f, 0.25f, 1.0f);
+        colors[ImGuiCol_HeaderHovered] = ImVec4(0.3f, 0.3f, 0.35f, 1.0f);
+        colors[ImGuiCol_HeaderActive] = ImVec4(0.15f, 0.15f, 0.2f, 1.0f);
+        colors[ImGuiCol_Button] = ImVec4(0.2f, 0.2f, 0.25f, 1.0f);
+        colors[ImGuiCol_ButtonHovered] = ImVec4(0.3f, 0.3f, 0.35f, 1.0f);
+        colors[ImGuiCol_ButtonActive] = ImVec4(0.15f, 0.15f, 0.2f, 1.0f);
+        colors[ImGuiCol_FrameBg] = ImVec4(0.2f, 0.2f, 0.25f, 1.0f);
+        colors[ImGuiCol_FrameBgHovered] = ImVec4(0.25f, 0.25f, 0.3f, 1.0f);
+        colors[ImGuiCol_FrameBgActive] = ImVec4(0.15f, 0.15f, 0.2f, 1.0f);
+        colors[ImGuiCol_Tab] = ImVec4(0.15f, 0.15f, 0.2f, 1.0f);
+        colors[ImGuiCol_TabHovered] = ImVec4(0.38f, 0.38f, 0.45f, 1.0f);
+        colors[ImGuiCol_TabActive] = ImVec4(0.28f, 0.28f, 0.35f, 1.0f);
+        colors[ImGuiCol_TitleBg] = ImVec4(0.1f, 0.1f, 0.13f, 1.0f);
+        colors[ImGuiCol_TitleBgActive] = ImVec4(0.15f, 0.15f, 0.2f, 1.0f);
+        colors[ImGuiCol_MenuBarBg] = ImVec4(0.14f, 0.14f, 0.18f, 1.0f);
+    }
+
+    ImGui_ImplGlfw_InitForOpenGL(window_, true);
+    ImGui_ImplOpenGL3_Init("#version 330");
+
+    return true;
+}
+
 void EditorApplication::Shutdown() {
-    EDITOR_LOG("Editor wird beendet...");
+    Log("Shutting down editor...");
     running_ = false;
+    ShutdownImGui();
+    ShutdownWindow();
+}
+
+void EditorApplication::ShutdownImGui() {
+    ImGui_ImplOpenGL3_Shutdown();
+    ImGui_ImplGlfw_Shutdown();
+    ImGui::DestroyContext();
+}
+
+void EditorApplication::ShutdownWindow() {
+    if (window_) {
+        glfwDestroyWindow(window_);
+        window_ = nullptr;
+    }
+    glfwTerminate();
 }
 
 void EditorApplication::Run() {
-    float32 delta_time = 1.0f / 60.0f;
-
-    while (running_) {
-        Update(delta_time);
+    while (running_ && !glfwWindowShouldClose(window_)) {
+        glfwPollEvents();
+        Update();
         Render();
     }
 }
 
-void EditorApplication::SetupCallbacks() {
-    // Hierarchy Callbacks
-    hierarchy_panel_->on_entity_selected = [this](Scene::EntityData* entity) {
-        selected_entity_ = entity;
-        inspector_panel_->SetSelectedEntity(entity);
-    };
-
-    hierarchy_panel_->on_entity_created = [this]() {
-        CreateEntity();
-    };
-
-    hierarchy_panel_->on_entity_deleted = [this](uint64 id) {
-        DeleteEntity(id);
-    };
-
-    // Menu Callbacks
-    main_menu_->on_new_scene = [this]() { NewScene(); };
-    main_menu_->on_save_scene = [this]() { SaveScene(); };
-    main_menu_->on_exit = [this]() { running_ = false; };
-
-    main_menu_->on_create_empty = [this]() { CreateEntity(); };
-    main_menu_->on_create_cube = [this]() { CreateCube(); };
-    main_menu_->on_create_sphere = [this]() { CreateSphere(); };
-    main_menu_->on_create_plane = [this]() { CreatePlane(); };
-    main_menu_->on_create_light = [this]() { CreateLight(); };
-    main_menu_->on_create_camera = [this]() { CreateCamera(); };
-
-    main_menu_->on_toggle_hierarchy = [this](bool v) { hierarchy_panel_->SetVisible(v); };
-    main_menu_->on_toggle_inspector = [this](bool v) { inspector_panel_->SetVisible(v); };
-    main_menu_->on_toggle_asset_browser = [this](bool v) { asset_browser_panel_->SetVisible(v); };
-    main_menu_->on_toggle_console = [this](bool v) { console_panel_->SetVisible(v); };
-
-    // Toolbar Callbacks
-    toolbar_->on_play = [this]() { Play(); };
-    toolbar_->on_pause = [this]() { Pause(); };
-    toolbar_->on_stop = [this]() { Stop(); };
-    toolbar_->on_step = [this]() { Step(); };
-}
-
-void EditorApplication::Update(float32 delta_time) {
+void EditorApplication::Update() {
     HandleShortcuts();
-
-    viewport_panel_->OnUpdate(delta_time);
-
-    hierarchy_panel_->SetScene(&current_scene_);
 }
 
 void EditorApplication::Render() {
-    RenderDockspace();
+    ImGui_ImplOpenGL3_NewFrame();
+    ImGui_ImplGlfw_NewFrame();
+    ImGui::NewFrame();
 
-    main_menu_->OnRender();
-    toolbar_->OnRender();
+    RenderUI();
 
-    hierarchy_panel_->OnRender();
-    inspector_panel_->OnRender();
-    asset_browser_panel_->OnRender();
-    viewport_panel_->OnRender();
-    console_panel_->OnRender();
+    ImGui::Render();
 
-    DialogManager::Instance().OnRender();
+    int display_w, display_h;
+    glfwGetFramebufferSize(window_, &display_w, &display_h);
+    glViewport(0, 0, display_w, display_h);
+    glClearColor(0.1f, 0.1f, 0.13f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT);
+
+    ImGui_ImplOpenGL3_RenderDrawData(ImGui::GetDrawData());
+
+    // Update viewports for multi-window support
+    ImGuiIO& io = ImGui::GetIO();
+    if (io.ConfigFlags & ImGuiConfigFlags_ViewportsEnable) {
+        GLFWwindow* backup = glfwGetCurrentContext();
+        ImGui::UpdatePlatformWindows();
+        ImGui::RenderPlatformWindowsDefault();
+        glfwMakeContextCurrent(backup);
+    }
+
+    glfwSwapBuffers(window_);
 }
 
-void EditorApplication::RenderDockspace() {
-    // Dockspace für Panel-Layout
-    // ImGui Docking würde hier verwendet
+void EditorApplication::RenderUI() {
+    // Enable dockspace over entire window
+    ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->WorkPos);
+    ImGui::SetNextWindowSize(viewport->WorkSize);
+    ImGui::SetNextWindowViewport(viewport->ID);
+
+    ImGuiWindowFlags window_flags =
+        ImGuiWindowFlags_MenuBar | ImGuiWindowFlags_NoDocking |
+        ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoCollapse |
+        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove |
+        ImGuiWindowFlags_NoBringToFrontOnFocus | ImGuiWindowFlags_NoNavFocus |
+        ImGuiWindowFlags_NoBackground;
+
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowRounding, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowBorderSize, 0.0f);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+
+    ImGui::Begin("DockSpace", nullptr, window_flags);
+    ImGui::PopStyleVar(3);
+
+    ImGuiID dockspace_id = ImGui::GetID("MainDockSpace");
+    ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_PassthruCentralNode);
+
+    // Render menu bar and panels
+    RenderMainMenu();
+    RenderToolbar();
+
+    if (show_hierarchy_) RenderHierarchy();
+    if (show_inspector_) RenderInspector();
+    if (show_asset_browser_) RenderAssetBrowser();
+    if (show_viewport_) RenderViewport();
+    if (show_console_) RenderConsole();
+
+    if (show_demo_window_) ImGui::ShowDemoWindow(&show_demo_window_);
+
+    ImGui::End();
+}
+
+void EditorApplication::RenderMainMenu() {
+    if (ImGui::BeginMainMenuBar()) {
+        if (ImGui::BeginMenu("File")) {
+            if (ImGui::MenuItem("New Scene", "Ctrl+N")) NewScene();
+            if (ImGui::MenuItem("Open Scene...", "Ctrl+O")) {
+                // TODO: File dialog
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Save", "Ctrl+S")) SaveScene();
+            if (ImGui::MenuItem("Save As...", "Ctrl+Shift+S")) {
+                // TODO: File dialog
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Exit", "Alt+F4")) running_ = false;
+            ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("Edit")) {
+            if (ImGui::MenuItem("Undo", "Ctrl+Z")) {}
+            if (ImGui::MenuItem("Redo", "Ctrl+Y")) {}
+            ImGui::Separator();
+            if (ImGui::MenuItem("Copy", "Ctrl+C")) {}
+            if (ImGui::MenuItem("Paste", "Ctrl+V")) {}
+            if (ImGui::MenuItem("Duplicate", "Ctrl+D")) {
+                if (selected_entity_) DuplicateEntity(selected_entity_->id);
+            }
+            if (ImGui::MenuItem("Delete", "Delete")) {
+                if (selected_entity_) DeleteEntity(selected_entity_->id);
+            }
+            ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("GameObject")) {
+            if (ImGui::MenuItem("Create Empty")) CreateEntity();
+            ImGui::Separator();
+            if (ImGui::BeginMenu("3D Objects")) {
+                if (ImGui::MenuItem("Cube")) CreateCube();
+                if (ImGui::MenuItem("Sphere")) CreateSphere();
+                if (ImGui::MenuItem("Plane")) CreatePlane();
+                ImGui::EndMenu();
+            }
+            ImGui::Separator();
+            if (ImGui::MenuItem("Light")) CreateLight();
+            if (ImGui::MenuItem("Camera")) CreateCamera();
+            ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("Window")) {
+            ImGui::MenuItem("Hierarchy", nullptr, &show_hierarchy_);
+            ImGui::MenuItem("Inspector", nullptr, &show_inspector_);
+            ImGui::MenuItem("Asset Browser", nullptr, &show_asset_browser_);
+            ImGui::MenuItem("Console", nullptr, &show_console_);
+            ImGui::MenuItem("Viewport", nullptr, &show_viewport_);
+            ImGui::Separator();
+            ImGui::MenuItem("ImGui Demo", nullptr, &show_demo_window_);
+            ImGui::EndMenu();
+        }
+
+        if (ImGui::BeginMenu("Help")) {
+            if (ImGui::MenuItem("Documentation")) {}
+            if (ImGui::MenuItem("About DRX Engine")) {
+                Log("DRX Engine v1.0.0 - Autonomous Game Engine");
+            }
+            ImGui::EndMenu();
+        }
+
+        // Status on the right
+        float status_width = 200.0f;
+        ImGui::SameLine(ImGui::GetWindowWidth() - status_width);
+        if (is_playing_) {
+            if (is_paused_) {
+                ImGui::TextColored(ImVec4(1, 0.8f, 0.2f, 1), "PAUSED");
+            } else {
+                ImGui::TextColored(ImVec4(0.3f, 1, 0.3f, 1), "PLAYING");
+            }
+        } else {
+            ImGui::TextColored(ImVec4(0.6f, 0.6f, 0.6f, 1), "EDITOR");
+        }
+
+        ImGui::EndMainMenuBar();
+    }
+}
+
+void EditorApplication::RenderToolbar() {
+    ImGui::SetNextWindowSize(ImVec2(0, 50), ImGuiCond_Always);
+    ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
+                             ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoCollapse;
+
+    if (ImGui::Begin("##Toolbar", nullptr, flags)) {
+        ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(8, 8));
+
+        // Play/Pause/Stop buttons
+        if (!is_playing_) {
+            if (ImGui::Button("Play", ImVec2(80, 30))) Play();
+        } else {
+            if (is_paused_) {
+                if (ImGui::Button("Resume", ImVec2(80, 30))) {
+                    is_paused_ = false;
+                    Log("Game resumed");
+                }
+            } else {
+                if (ImGui::Button("Pause", ImVec2(80, 30))) Pause();
+            }
+        }
+
+        ImGui::SameLine();
+
+        ImGui::BeginDisabled(!is_playing_);
+        if (ImGui::Button("Stop", ImVec2(80, 30))) Stop();
+        ImGui::EndDisabled();
+
+        ImGui::SameLine();
+        ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
+        ImGui::SameLine();
+
+        // Gizmo mode buttons
+        bool translate = (gizmo_mode_ == GizmoMode::Translate);
+        bool rotate = (gizmo_mode_ == GizmoMode::Rotate);
+        bool scale = (gizmo_mode_ == GizmoMode::Scale);
+
+        if (ImGui::RadioButton("Move (W)", translate)) gizmo_mode_ = GizmoMode::Translate;
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Rotate (E)", rotate)) gizmo_mode_ = GizmoMode::Rotate;
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Scale (R)", scale)) gizmo_mode_ = GizmoMode::Scale;
+
+        ImGui::PopStyleVar();
+    }
+    ImGui::End();
+}
+
+void EditorApplication::RenderHierarchy() {
+    if (ImGui::Begin("Hierarchy", &show_hierarchy_)) {
+        // Search
+        static char search[128] = "";
+        ImGui::InputTextWithHint("##Search", "Search...", search, sizeof(search));
+
+        ImGui::Separator();
+
+        // Add entity button
+        if (ImGui::Button("+ Add Entity", ImVec2(-1, 30))) {
+            CreateEntity();
+        }
+
+        ImGui::Separator();
+
+        // Entity list
+        for (auto& entity : current_scene_.entities) {
+            // Filter by search
+            if (strlen(search) > 0 && entity.name.find(search) == String::npos) {
+                continue;
+            }
+
+            // Only show root entities
+            if (entity.parent_id == 0) {
+                RenderEntityNode(entity);
+            }
+        }
+
+        // Right-click context menu
+        if (ImGui::BeginPopupContextWindow("HierarchyContext", ImGuiPopupFlags_MouseButtonRight | ImGuiPopupFlags_NoOpenOverItems)) {
+            if (ImGui::MenuItem("Create Empty")) CreateEntity();
+            ImGui::Separator();
+            if (ImGui::MenuItem("Create Cube")) CreateCube();
+            if (ImGui::MenuItem("Create Sphere")) CreateSphere();
+            if (ImGui::MenuItem("Create Plane")) CreatePlane();
+            ImGui::Separator();
+            if (ImGui::MenuItem("Create Light")) CreateLight();
+            if (ImGui::MenuItem("Create Camera")) CreateCamera();
+            ImGui::EndPopup();
+        }
+    }
+    ImGui::End();
+}
+
+void EditorApplication::RenderEntityNode(Scene::EntityData& entity) {
+    ImGuiTreeNodeFlags flags = ImGuiTreeNodeFlags_OpenOnArrow |
+                               ImGuiTreeNodeFlags_SpanAvailWidth;
+
+    if (selected_entity_ && selected_entity_->id == entity.id) {
+        flags |= ImGuiTreeNodeFlags_Selected;
+    }
+
+    // Check for children
+    bool has_children = false;
+    for (const auto& e : current_scene_.entities) {
+        if (e.parent_id == entity.id) {
+            has_children = true;
+            break;
+        }
+    }
+
+    if (!has_children) {
+        flags |= ImGuiTreeNodeFlags_Leaf;
+    }
+
+    // Icon based on components
+    const char* icon = "O";
+    for (const auto& comp : entity.components) {
+        if (comp.type == "Camera") { icon = "[C]"; break; }
+        if (comp.type == "Light") { icon = "[L]"; break; }
+        if (comp.type == "MeshRenderer") { icon = "[M]"; break; }
+    }
+
+    String label = String(icon) + " " + entity.name;
+    bool is_open = ImGui::TreeNodeEx((void*)(intptr_t)entity.id, flags, "%s", label.c_str());
+
+    // Selection
+    if (ImGui::IsItemClicked()) {
+        selected_entity_ = &entity;
+    }
+
+    // Drag & drop
+    if (ImGui::BeginDragDropSource()) {
+        ImGui::SetDragDropPayload("ENTITY", &entity.id, sizeof(uint64));
+        ImGui::Text("Moving: %s", entity.name.c_str());
+        ImGui::EndDragDropSource();
+    }
+
+    if (ImGui::BeginDragDropTarget()) {
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("ENTITY")) {
+            uint64 dropped_id = *(uint64*)payload->Data;
+            for (auto& e : current_scene_.entities) {
+                if (e.id == dropped_id) {
+                    e.parent_id = entity.id;
+                    break;
+                }
+            }
+        }
+        ImGui::EndDragDropTarget();
+    }
+
+    // Context menu
+    if (ImGui::BeginPopupContextItem()) {
+        if (ImGui::MenuItem("Duplicate")) DuplicateEntity(entity.id);
+        if (ImGui::MenuItem("Delete")) DeleteEntity(entity.id);
+        ImGui::EndPopup();
+    }
+
+    // Draw children
+    if (is_open) {
+        for (auto& child : current_scene_.entities) {
+            if (child.parent_id == entity.id) {
+                RenderEntityNode(child);
+            }
+        }
+        ImGui::TreePop();
+    }
+}
+
+void EditorApplication::RenderInspector() {
+    if (ImGui::Begin("Inspector", &show_inspector_)) {
+        if (selected_entity_) {
+            // Entity name
+            char name_buf[128];
+            strncpy(name_buf, selected_entity_->name.c_str(), sizeof(name_buf) - 1);
+            name_buf[sizeof(name_buf) - 1] = '\0';
+
+            ImGui::Text("Name:");
+            ImGui::SameLine();
+            if (ImGui::InputText("##Name", name_buf, sizeof(name_buf))) {
+                selected_entity_->name = name_buf;
+                scene_modified_ = true;
+            }
+
+            ImGui::Checkbox("Active", &selected_entity_->enabled);
+
+            ImGui::Separator();
+
+            // Transform
+            RenderTransformComponent();
+
+            ImGui::Separator();
+
+            // Components
+            RenderComponents();
+
+            ImGui::Separator();
+
+            // Add component button
+            if (ImGui::Button("+ Add Component", ImVec2(-1, 30))) {
+                ImGui::OpenPopup("AddComponentPopup");
+            }
+            RenderAddComponentPopup();
+
+        } else {
+            ImGui::TextDisabled("No entity selected");
+            ImGui::Text("");
+            ImGui::Text("Select an entity in the");
+            ImGui::Text("Hierarchy to view its properties.");
+        }
+    }
+    ImGui::End();
+}
+
+void EditorApplication::RenderTransformComponent() {
+    if (!selected_entity_) return;
+
+    if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen)) {
+        auto& t = selected_entity_->transform;
+
+        // Position
+        float pos[3] = {t.position.x, t.position.y, t.position.z};
+        ImGui::Text("Position");
+        if (ImGui::DragFloat3("##Pos", pos, 0.1f)) {
+            t.position = {pos[0], pos[1], pos[2]};
+            scene_modified_ = true;
+        }
+
+        // Rotation
+        Math::Vector3 euler = t.rotation.ToEuler();
+        float rot[3] = {euler.x, euler.y, euler.z};
+        ImGui::Text("Rotation");
+        if (ImGui::DragFloat3("##Rot", rot, 1.0f)) {
+            t.rotation = Math::Quaternion::FromEuler({rot[0], rot[1], rot[2]});
+            scene_modified_ = true;
+        }
+
+        // Scale
+        float scale[3] = {t.scale.x, t.scale.y, t.scale.z};
+        ImGui::Text("Scale");
+        if (ImGui::DragFloat3("##Scale", scale, 0.1f)) {
+            t.scale = {scale[0], scale[1], scale[2]};
+            scene_modified_ = true;
+        }
+
+        if (ImGui::Button("Reset Transform")) {
+            t.position = Math::Vector3::Zero();
+            t.rotation = Math::Quaternion::Identity();
+            t.scale = Math::Vector3::One();
+            scene_modified_ = true;
+        }
+    }
+}
+
+void EditorApplication::RenderComponents() {
+    if (!selected_entity_) return;
+
+    for (size_t i = 0; i < selected_entity_->components.size(); ++i) {
+        auto& comp = selected_entity_->components[i];
+
+        ImGui::PushID((int)i);
+
+        String header = String(GetComponentIcon(comp.type)) + " " + comp.type;
+        bool is_open = ImGui::CollapsingHeader(header.c_str(), ImGuiTreeNodeFlags_DefaultOpen);
+
+        // Right-click to remove
+        if (ImGui::BeginPopupContextItem()) {
+            if (ImGui::MenuItem("Remove Component")) {
+                selected_entity_->components.erase(selected_entity_->components.begin() + i);
+                scene_modified_ = true;
+                ImGui::EndPopup();
+                ImGui::PopID();
+                return;
+            }
+            ImGui::EndPopup();
+        }
+
+        if (is_open) {
+            ImGui::Checkbox("Enabled", &comp.enabled);
+
+            // Component-specific UI
+            if (comp.type == "Camera") {
+                static float fov = 60.0f;
+                static float near_plane = 0.1f;
+                static float far_plane = 1000.0f;
+                ImGui::SliderFloat("FOV", &fov, 30.0f, 120.0f);
+                ImGui::DragFloat("Near", &near_plane, 0.01f, 0.01f, 10.0f);
+                ImGui::DragFloat("Far", &far_plane, 1.0f, 10.0f, 10000.0f);
+            }
+            else if (comp.type == "Light") {
+                static int light_type = 0;
+                static float color[3] = {1, 1, 1};
+                static float intensity = 1.0f;
+                const char* types[] = {"Directional", "Point", "Spot"};
+                ImGui::Combo("Type", &light_type, types, 3);
+                ImGui::ColorEdit3("Color", color);
+                ImGui::SliderFloat("Intensity", &intensity, 0.0f, 10.0f);
+            }
+            else if (comp.type == "MeshRenderer") {
+                ImGui::Text("Mesh: Cube");
+                if (ImGui::Button("Select Mesh...")) {}
+                ImGui::Text("Material: Default");
+                if (ImGui::Button("Select Material...")) {}
+            }
+            else if (comp.type == "RigidBody") {
+                static float mass = 1.0f;
+                static bool use_gravity = true;
+                ImGui::DragFloat("Mass", &mass, 0.1f, 0.0f, 1000.0f);
+                ImGui::Checkbox("Use Gravity", &use_gravity);
+            }
+            else if (comp.type == "AudioSource") {
+                static float volume = 1.0f;
+                static bool loop = false;
+                ImGui::Text("Audio Clip: None");
+                if (ImGui::Button("Select Audio...")) {}
+                ImGui::SliderFloat("Volume", &volume, 0.0f, 1.0f);
+                ImGui::Checkbox("Loop", &loop);
+            }
+        }
+
+        ImGui::PopID();
+    }
+}
+
+void EditorApplication::RenderAddComponentPopup() {
+    if (ImGui::BeginPopup("AddComponentPopup")) {
+        ImGui::Text("Add Component:");
+        ImGui::Separator();
+
+        if (ImGui::MenuItem("[M] Mesh Renderer")) {
+            Scene::ComponentData comp;
+            comp.type = "MeshRenderer";
+            selected_entity_->components.push_back(comp);
+            scene_modified_ = true;
+        }
+        if (ImGui::MenuItem("[C] Camera")) {
+            Scene::ComponentData comp;
+            comp.type = "Camera";
+            selected_entity_->components.push_back(comp);
+            scene_modified_ = true;
+        }
+        if (ImGui::MenuItem("[L] Light")) {
+            Scene::ComponentData comp;
+            comp.type = "Light";
+            selected_entity_->components.push_back(comp);
+            scene_modified_ = true;
+        }
+        if (ImGui::MenuItem("[P] RigidBody")) {
+            Scene::ComponentData comp;
+            comp.type = "RigidBody";
+            selected_entity_->components.push_back(comp);
+            scene_modified_ = true;
+        }
+        if (ImGui::MenuItem("[A] Audio Source")) {
+            Scene::ComponentData comp;
+            comp.type = "AudioSource";
+            selected_entity_->components.push_back(comp);
+            scene_modified_ = true;
+        }
+        if (ImGui::MenuItem("[S] Script")) {
+            Scene::ComponentData comp;
+            comp.type = "Script";
+            selected_entity_->components.push_back(comp);
+            scene_modified_ = true;
+        }
+
+        ImGui::EndPopup();
+    }
+}
+
+void EditorApplication::RenderAssetBrowser() {
+    if (ImGui::Begin("Assets", &show_asset_browser_)) {
+        // Path bar
+        ImGui::Text("Path: %s", asset_current_path_.c_str());
+
+        ImGui::SameLine();
+        if (ImGui::Button("Up")) {
+            if (asset_current_path_ != asset_root_path_) {
+                asset_current_path_ = fs::path(asset_current_path_).parent_path().string();
+                ScanDirectory(asset_current_path_);
+            }
+        }
+
+        ImGui::SameLine();
+        if (ImGui::Button("Refresh")) {
+            ScanDirectory(asset_current_path_);
+        }
+
+        ImGui::Separator();
+
+        // Icon size slider
+        ImGui::SliderFloat("Icon Size", &icon_size_, 40.0f, 150.0f);
+
+        ImGui::Separator();
+
+        // Asset grid
+        float panel_width = ImGui::GetContentRegionAvail().x;
+        int columns = std::max(1, (int)(panel_width / (icon_size_ + 20)));
+
+        if (ImGui::BeginChild("AssetGrid")) {
+            int col = 0;
+            for (size_t i = 0; i < asset_items_.size(); ++i) {
+                const auto& item = asset_items_[i];
+
+                ImGui::PushID((int)i);
+
+                ImGui::BeginGroup();
+
+                // Selection highlight
+                bool is_selected = ((int)i == selected_asset_);
+                if (is_selected) {
+                    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.3f, 0.5f, 0.8f, 1.0f));
+                }
+
+                // Icon button
+                if (ImGui::Button(GetAssetIcon(item.type), ImVec2(icon_size_, icon_size_))) {
+                    selected_asset_ = (int)i;
+                }
+
+                if (is_selected) {
+                    ImGui::PopStyleColor();
+                }
+
+                // Double-click to open folder
+                if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(0)) {
+                    if (item.is_directory) {
+                        asset_current_path_ = item.path;
+                        ScanDirectory(asset_current_path_);
+                    }
+                }
+
+                // Drag source
+                if (ImGui::BeginDragDropSource()) {
+                    ImGui::SetDragDropPayload("ASSET", item.path.c_str(), item.path.size() + 1);
+                    ImGui::Text("%s %s", GetAssetIcon(item.type), item.name.c_str());
+                    ImGui::EndDragDropSource();
+                }
+
+                // Name (truncated)
+                String display = item.name;
+                if (display.length() > 12) {
+                    display = display.substr(0, 10) + "...";
+                }
+                ImGui::TextWrapped("%s", display.c_str());
+
+                ImGui::EndGroup();
+
+                ImGui::PopID();
+
+                col++;
+                if (col < columns) {
+                    ImGui::SameLine();
+                } else {
+                    col = 0;
+                }
+            }
+        }
+        ImGui::EndChild();
+    }
+    ImGui::End();
+}
+
+void EditorApplication::RenderViewport() {
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+
+    if (ImGui::Begin("Viewport", &show_viewport_)) {
+        // Toolbar
+        ImGui::PopStyleVar();
+
+        if (ImGui::RadioButton("Translate (W)", gizmo_mode_ == GizmoMode::Translate))
+            gizmo_mode_ = GizmoMode::Translate;
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Rotate (E)", gizmo_mode_ == GizmoMode::Rotate))
+            gizmo_mode_ = GizmoMode::Rotate;
+        ImGui::SameLine();
+        if (ImGui::RadioButton("Scale (R)", gizmo_mode_ == GizmoMode::Scale))
+            gizmo_mode_ = GizmoMode::Scale;
+
+        ImGui::SameLine();
+        ImGui::Text("  Camera: %.1f, %.1f, %.1f", camera_pos_[0], camera_pos_[1], camera_pos_[2]);
+
+        ImGui::Separator();
+
+        // Viewport area
+        ImVec2 size = ImGui::GetContentRegionAvail();
+
+        // Draw a placeholder viewport (dark area with grid info)
+        ImVec2 pos = ImGui::GetCursorScreenPos();
+        ImDrawList* draw_list = ImGui::GetWindowDrawList();
+
+        // Background
+        draw_list->AddRectFilled(pos, ImVec2(pos.x + size.x, pos.y + size.y),
+                                  IM_COL32(30, 30, 40, 255));
+
+        // Grid lines
+        float grid_step = 50.0f;
+        ImU32 grid_color = IM_COL32(50, 50, 60, 255);
+        for (float x = pos.x; x < pos.x + size.x; x += grid_step) {
+            draw_list->AddLine(ImVec2(x, pos.y), ImVec2(x, pos.y + size.y), grid_color);
+        }
+        for (float y = pos.y; y < pos.y + size.y; y += grid_step) {
+            draw_list->AddLine(ImVec2(pos.x, y), ImVec2(pos.x + size.x, y), grid_color);
+        }
+
+        // Center info
+        String info = "3D Viewport\nWASD to move camera\nRight-click to look around";
+        ImVec2 text_size = ImGui::CalcTextSize(info.c_str());
+        draw_list->AddText(
+            ImVec2(pos.x + (size.x - text_size.x) / 2, pos.y + (size.y - text_size.y) / 2),
+            IM_COL32(100, 100, 100, 255), info.c_str()
+        );
+
+        // Draw entities as boxes
+        for (const auto& entity : current_scene_.entities) {
+            float scale = 20.0f;
+            float cx = pos.x + size.x / 2 + entity.transform.position.x * scale;
+            float cy = pos.y + size.y / 2 - entity.transform.position.z * scale;
+
+            ImU32 color = IM_COL32(100, 150, 200, 255);
+            if (selected_entity_ && selected_entity_->id == entity.id) {
+                color = IM_COL32(255, 200, 100, 255);
+            }
+
+            draw_list->AddRectFilled(
+                ImVec2(cx - 10, cy - 10),
+                ImVec2(cx + 10, cy + 10),
+                color
+            );
+            draw_list->AddText(ImVec2(cx - 10, cy + 12), IM_COL32(200, 200, 200, 255),
+                               entity.name.substr(0, 8).c_str());
+        }
+
+        // Handle viewport interaction
+        viewport_focused_ = ImGui::IsWindowFocused();
+
+        ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
+    } else {
+        ImGui::PopStyleVar();
+    }
+    ImGui::End();
+    ImGui::PopStyleVar();
+}
+
+void EditorApplication::RenderConsole() {
+    if (ImGui::Begin("Console", &show_console_)) {
+        // Toolbar
+        if (ImGui::Button("Clear")) {
+            console_messages_.clear();
+        }
+        ImGui::SameLine();
+        ImGui::Checkbox("Info", &show_info_);
+        ImGui::SameLine();
+        ImGui::Checkbox("Warnings", &show_warnings_);
+        ImGui::SameLine();
+        ImGui::Checkbox("Errors", &show_errors_);
+        ImGui::SameLine();
+        ImGui::Text("| %zu messages", console_messages_.size());
+
+        ImGui::Separator();
+
+        // Messages
+        if (ImGui::BeginChild("Messages", ImVec2(0, -30), true)) {
+            for (const auto& msg : console_messages_) {
+                if (msg.level == ConsoleMessage::Level::Info && !show_info_) continue;
+                if (msg.level == ConsoleMessage::Level::Warning && !show_warnings_) continue;
+                if (msg.level == ConsoleMessage::Level::Error && !show_errors_) continue;
+
+                ImVec4 color;
+                const char* prefix;
+                switch (msg.level) {
+                    case ConsoleMessage::Level::Info:
+                        color = ImVec4(0.8f, 0.8f, 0.8f, 1.0f);
+                        prefix = "[INFO]";
+                        break;
+                    case ConsoleMessage::Level::Warning:
+                        color = ImVec4(1.0f, 0.8f, 0.2f, 1.0f);
+                        prefix = "[WARN]";
+                        break;
+                    case ConsoleMessage::Level::Error:
+                        color = ImVec4(1.0f, 0.3f, 0.3f, 1.0f);
+                        prefix = "[ERROR]";
+                        break;
+                    default:
+                        color = ImVec4(0.5f, 0.5f, 1.0f, 1.0f);
+                        prefix = "[DEBUG]";
+                        break;
+                }
+
+                ImGui::TextColored(color, "[%s] %s %s", msg.timestamp.c_str(), prefix, msg.message.c_str());
+
+                if (msg.count > 1) {
+                    ImGui::SameLine();
+                    ImGui::Text("(x%d)", msg.count);
+                }
+            }
+
+            if (console_scroll_to_bottom_) {
+                ImGui::SetScrollHereY(1.0f);
+                console_scroll_to_bottom_ = false;
+            }
+        }
+        ImGui::EndChild();
+
+        ImGui::Separator();
+
+        // Input
+        ImGui::PushItemWidth(-60);
+        if (ImGui::InputText("##Input", console_input_, sizeof(console_input_),
+                             ImGuiInputTextFlags_EnterReturnsTrue)) {
+            if (strlen(console_input_) > 0) {
+                Log(String("> ") + console_input_);
+
+                // Simple commands
+                String cmd = console_input_;
+                if (cmd == "help") {
+                    Log("Commands: help, clear, version, entities");
+                } else if (cmd == "clear") {
+                    console_messages_.clear();
+                } else if (cmd == "version") {
+                    Log("DRX Engine v1.0.0");
+                } else if (cmd == "entities") {
+                    Log("Entities in scene: " + std::to_string(current_scene_.entities.size()));
+                } else {
+                    LogWarning("Unknown command: " + cmd);
+                }
+
+                console_input_[0] = '\0';
+            }
+        }
+        ImGui::PopItemWidth();
+        ImGui::SameLine();
+        if (ImGui::Button("Send")) {
+            // Trigger input handling
+        }
+    }
+    ImGui::End();
 }
 
 void EditorApplication::HandleShortcuts() {
-    // Keyboard shortcuts
-    // Ctrl+N, Ctrl+O, Ctrl+S, etc.
+    ImGuiIO& io = ImGui::GetIO();
+
+    if (io.KeyCtrl) {
+        if (ImGui::IsKeyPressed(ImGuiKey_N)) NewScene();
+        if (ImGui::IsKeyPressed(ImGuiKey_S)) SaveScene();
+        if (ImGui::IsKeyPressed(ImGuiKey_D) && selected_entity_) {
+            DuplicateEntity(selected_entity_->id);
+        }
+    }
+
+    if (ImGui::IsKeyPressed(ImGuiKey_Delete) && selected_entity_) {
+        DeleteEntity(selected_entity_->id);
+    }
+
+    // Gizmo shortcuts
+    if (!io.WantCaptureKeyboard) {
+        if (ImGui::IsKeyPressed(ImGuiKey_W)) gizmo_mode_ = GizmoMode::Translate;
+        if (ImGui::IsKeyPressed(ImGuiKey_E)) gizmo_mode_ = GizmoMode::Rotate;
+        if (ImGui::IsKeyPressed(ImGuiKey_R)) gizmo_mode_ = GizmoMode::Scale;
+    }
 }
 
-// Entity Creation
+// ============================================================================
+// Entity Management
+// ============================================================================
+
 Scene::EntityData* EditorApplication::CreateEntity(const String& name) {
     Scene::EntityData entity;
     entity.id = next_entity_id_++;
     entity.name = name;
     entity.enabled = true;
-    entity.parent_id = 0;
-    entity.transform.position = Math::Vector3::Zero;
-    entity.transform.rotation = Math::Quaternion::Identity;
-    entity.transform.scale = Math::Vector3::One;
+    entity.transform.position = Math::Vector3::Zero();
+    entity.transform.rotation = Math::Quaternion::Identity();
+    entity.transform.scale = Math::Vector3::One();
 
     current_scene_.entities.push_back(entity);
     scene_modified_ = true;
 
-    EDITOR_LOG("Objekt erstellt: " + name);
+    Log("Created entity: " + name);
 
     return &current_scene_.entities.back();
 }
 
 Scene::EntityData* EditorApplication::CreateCube(const String& name) {
-    auto entity = CreateEntity(name);
-    Scene::ComponentData mesh_comp;
-    mesh_comp.type = "MeshRenderer";
-    mesh_comp.enabled = true;
-    // mesh_comp.data["mesh"] = "Primitives/Cube";
-    entity->components.push_back(mesh_comp);
+    auto* entity = CreateEntity(name);
+    Scene::ComponentData comp;
+    comp.type = "MeshRenderer";
+    entity->components.push_back(comp);
     return entity;
 }
 
 Scene::EntityData* EditorApplication::CreateSphere(const String& name) {
-    auto entity = CreateEntity(name);
-    Scene::ComponentData mesh_comp;
-    mesh_comp.type = "MeshRenderer";
-    mesh_comp.enabled = true;
-    entity->components.push_back(mesh_comp);
+    auto* entity = CreateEntity(name);
+    Scene::ComponentData comp;
+    comp.type = "MeshRenderer";
+    entity->components.push_back(comp);
     return entity;
 }
 
 Scene::EntityData* EditorApplication::CreatePlane(const String& name) {
-    auto entity = CreateEntity(name);
-    Scene::ComponentData mesh_comp;
-    mesh_comp.type = "MeshRenderer";
-    mesh_comp.enabled = true;
-    entity->components.push_back(mesh_comp);
+    auto* entity = CreateEntity(name);
+    Scene::ComponentData comp;
+    comp.type = "MeshRenderer";
+    entity->components.push_back(comp);
     return entity;
 }
 
 Scene::EntityData* EditorApplication::CreateLight(const String& name) {
-    auto entity = CreateEntity(name);
-    Scene::ComponentData light_comp;
-    light_comp.type = "Light";
-    light_comp.enabled = true;
-    entity->components.push_back(light_comp);
+    auto* entity = CreateEntity(name);
+    Scene::ComponentData comp;
+    comp.type = "Light";
+    entity->components.push_back(comp);
     return entity;
 }
 
 Scene::EntityData* EditorApplication::CreateCamera(const String& name) {
-    auto entity = CreateEntity(name);
-    Scene::ComponentData camera_comp;
-    camera_comp.type = "Camera";
-    camera_comp.enabled = true;
-    entity->components.push_back(camera_comp);
+    auto* entity = CreateEntity(name);
+    Scene::ComponentData comp;
+    comp.type = "Camera";
+    entity->components.push_back(comp);
     return entity;
 }
 
@@ -1376,12 +1049,11 @@ void EditorApplication::DeleteEntity(uint64 entity_id) {
         [entity_id](const Scene::EntityData& e) { return e.id == entity_id; });
 
     if (it != current_scene_.entities.end()) {
-        EDITOR_LOG("Objekt gelöscht: " + it->name);
+        Log("Deleted entity: " + it->name);
         current_scene_.entities.erase(it);
 
         if (selected_entity_ && selected_entity_->id == entity_id) {
             selected_entity_ = nullptr;
-            inspector_panel_->SetSelectedEntity(nullptr);
         }
 
         scene_modified_ = true;
@@ -1396,141 +1068,189 @@ void EditorApplication::DuplicateEntity(uint64 entity_id) {
             copy.name = entity.name + " (Copy)";
             current_scene_.entities.push_back(copy);
             scene_modified_ = true;
-            EDITOR_LOG("Objekt dupliziert: " + copy.name);
-            break;
+            Log("Duplicated entity: " + copy.name);
+            return;
         }
     }
 }
 
+// ============================================================================
 // Scene Management
+// ============================================================================
+
 void EditorApplication::NewScene() {
     current_scene_ = Scene::SceneData{};
-    current_scene_.name = "Unbenannte Szene";
-    current_scene_.version = "1.0";
+    current_scene_.name = "Untitled Scene";
     current_scene_path_.clear();
-    scene_modified_ = false;
-
     selected_entity_ = nullptr;
-    inspector_panel_->SetSelectedEntity(nullptr);
+    scene_modified_ = false;
+    next_entity_id_ = 1;
 
-    EDITOR_LOG("Neue Szene erstellt");
+    Log("New scene created");
 }
 
 void EditorApplication::OpenScene(const String& path) {
-    if (Scene::SceneSerializer::Instance().LoadScene(current_scene_, path)) {
-        current_scene_path_ = path;
-        scene_modified_ = false;
-        EDITOR_LOG("Szene geladen: " + path);
-    } else {
-        EDITOR_ERROR("Fehler beim Laden der Szene: " + path);
-    }
+    Log("Opening scene: " + path);
+    // TODO: Implement scene loading
 }
 
 void EditorApplication::SaveScene() {
     if (current_scene_path_.empty()) {
-        // Show save dialog
+        Log("No path set - use Save As");
         return;
     }
     SaveSceneAs(current_scene_path_);
 }
 
 void EditorApplication::SaveSceneAs(const String& path) {
-    if (Scene::SceneSerializer::Instance().SaveScene(current_scene_, path)) {
-        current_scene_path_ = path;
-        scene_modified_ = false;
-        EDITOR_LOG("Szene gespeichert: " + path);
-    } else {
-        EDITOR_ERROR("Fehler beim Speichern der Szene: " + path);
-    }
+    Log("Saving scene to: " + path);
+    current_scene_path_ = path;
+    scene_modified_ = false;
+    // TODO: Implement scene saving
 }
 
-// Playmode
+// ============================================================================
+// Play Mode
+// ============================================================================
+
 void EditorApplication::Play() {
     is_playing_ = true;
     is_paused_ = false;
-    EDITOR_LOG("Spiel gestartet");
+    Log("Play mode started");
 }
 
 void EditorApplication::Pause() {
     is_paused_ = true;
-    EDITOR_LOG("Spiel pausiert");
+    Log("Play mode paused");
 }
 
 void EditorApplication::Stop() {
     is_playing_ = false;
     is_paused_ = false;
-    EDITOR_LOG("Spiel gestoppt");
-}
-
-void EditorApplication::Step() {
-    EDITOR_LOG("Ein Frame weiter");
-}
-
-void EditorApplication::Undo() {
-    EDITOR_LOG("Rückgängig");
-}
-
-void EditorApplication::Redo() {
-    EDITOR_LOG("Wiederholen");
+    Log("Play mode stopped");
 }
 
 // ============================================================================
-// DialogManager Implementation
+// Logging
 // ============================================================================
 
-DialogManager& DialogManager::Instance() {
-    static DialogManager instance;
-    return instance;
+void EditorApplication::Log(const String& message) {
+    AddLog(ConsoleMessage::Level::Info, message);
 }
 
-void DialogManager::ShowMessageBox(const String& title, const String& message) {
-    message_dialog_.open = true;
-    message_dialog_.title = title;
-    message_dialog_.message = message;
+void EditorApplication::LogWarning(const String& message) {
+    AddLog(ConsoleMessage::Level::Warning, message);
 }
 
-void DialogManager::ShowConfirmDialog(const String& title, const String& message,
-                                       std::function<void(bool)> callback) {
-    confirm_dialog_.open = true;
-    confirm_dialog_.title = title;
-    confirm_dialog_.message = message;
-    confirm_dialog_.confirm_callback = callback;
+void EditorApplication::LogError(const String& message) {
+    AddLog(ConsoleMessage::Level::Error, message);
 }
 
-void DialogManager::OnRender() {
-    // Message Box
-    if (message_dialog_.open) {
-        if (BeginPopupModal(message_dialog_.title.c_str())) {
-            Text("%s", message_dialog_.message.c_str());
-            if (Button("OK")) {
-                message_dialog_.open = false;
-                CloseCurrentPopup();
-            }
-            EndPopup();
-        }
+void EditorApplication::AddLog(ConsoleMessage::Level level, const String& message) {
+    auto now = std::chrono::system_clock::now();
+    auto time = std::chrono::system_clock::to_time_t(now);
+    char timestamp[32];
+    strftime(timestamp, sizeof(timestamp), "%H:%M:%S", localtime(&time));
+
+    // Collapse repeated messages
+    if (!console_messages_.empty() &&
+        console_messages_.back().level == level &&
+        console_messages_.back().message == message) {
+        console_messages_.back().count++;
+    } else {
+        console_messages_.push_back({level, message, timestamp, 1});
     }
 
-    // Confirm Dialog
-    if (confirm_dialog_.open) {
-        if (BeginPopupModal(confirm_dialog_.title.c_str())) {
-            Text("%s", confirm_dialog_.message.c_str());
-            if (Button("Ja")) {
-                if (confirm_dialog_.confirm_callback) {
-                    confirm_dialog_.confirm_callback(true);
-                }
-                confirm_dialog_.open = false;
-                CloseCurrentPopup();
+    console_scroll_to_bottom_ = true;
+
+    // Also print to stdout
+    std::cout << "[" << timestamp << "] " << message << std::endl;
+}
+
+// ============================================================================
+// Helpers
+// ============================================================================
+
+const char* EditorApplication::GetComponentIcon(const String& type) {
+    if (type == "MeshRenderer") return "[M]";
+    if (type == "Camera") return "[C]";
+    if (type == "Light") return "[L]";
+    if (type == "RigidBody") return "[P]";
+    if (type == "AudioSource") return "[A]";
+    if (type == "Script") return "[S]";
+    return "[?]";
+}
+
+void EditorApplication::ScanDirectory(const String& path) {
+    asset_items_.clear();
+    selected_asset_ = -1;
+
+    if (!fs::exists(path)) {
+        return;
+    }
+
+    for (const auto& entry : fs::directory_iterator(path)) {
+        AssetItem item;
+        item.path = entry.path().string();
+        item.name = entry.path().filename().string();
+        item.is_directory = entry.is_directory();
+
+        if (item.is_directory) {
+            item.type = AssetItem::Type::Folder;
+        } else {
+            item.extension = entry.path().extension().string();
+            item.type = GetAssetType(item.extension);
+            try {
+                item.size = fs::file_size(entry.path());
+            } catch (...) {
+                item.size = 0;
             }
-            SameLine();
-            if (Button("Nein")) {
-                if (confirm_dialog_.confirm_callback) {
-                    confirm_dialog_.confirm_callback(false);
-                }
-                confirm_dialog_.open = false;
-                CloseCurrentPopup();
-            }
-            EndPopup();
         }
+
+        asset_items_.push_back(item);
+    }
+
+    // Sort: folders first, then alphabetically
+    std::sort(asset_items_.begin(), asset_items_.end(),
+        [](const AssetItem& a, const AssetItem& b) {
+            if (a.is_directory != b.is_directory) return a.is_directory;
+            return a.name < b.name;
+        });
+}
+
+AssetItem::Type EditorApplication::GetAssetType(const String& ext) {
+    String lower = ext;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+
+    if (lower == ".png" || lower == ".jpg" || lower == ".jpeg" ||
+        lower == ".tga" || lower == ".bmp") return AssetItem::Type::Texture;
+    if (lower == ".obj" || lower == ".fbx" || lower == ".gltf" ||
+        lower == ".glb") return AssetItem::Type::Model;
+    if (lower == ".wav" || lower == ".mp3" || lower == ".ogg")
+        return AssetItem::Type::Audio;
+    if (lower == ".lua" || lower == ".py" || lower == ".cpp")
+        return AssetItem::Type::Script;
+    if (lower == ".drxscene") return AssetItem::Type::Scene;
+    if (lower == ".drxprefab") return AssetItem::Type::Prefab;
+    if (lower == ".vert" || lower == ".frag" || lower == ".glsl")
+        return AssetItem::Type::Shader;
+    if (lower == ".drxmat") return AssetItem::Type::Material;
+
+    return AssetItem::Type::Unknown;
+}
+
+const char* EditorApplication::GetAssetIcon(AssetItem::Type type) {
+    switch (type) {
+        case AssetItem::Type::Folder: return "[DIR]";
+        case AssetItem::Type::Texture: return "[TEX]";
+        case AssetItem::Type::Model: return "[MDL]";
+        case AssetItem::Type::Audio: return "[SND]";
+        case AssetItem::Type::Script: return "[SCR]";
+        case AssetItem::Type::Scene: return "[SCN]";
+        case AssetItem::Type::Prefab: return "[PRE]";
+        case AssetItem::Type::Shader: return "[SHD]";
+        case AssetItem::Type::Material: return "[MAT]";
+        default: return "[???]";
     }
 }
 

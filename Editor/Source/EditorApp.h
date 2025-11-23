@@ -1,107 +1,101 @@
 /**
  * DRX Engine - Visual Editor
- * Ein kompletter visueller Editor zum Erstellen von Spielen
+ * Complete visual editor for game creation using ImGui
  */
 
 #pragma once
 
-#include "Core/Public/CoreTypes.h"
-#include "Core/Public/Math/Vector3.h"
-#include "Core/Public/Math/Vector4.h"
-#include "Scene/Public/SceneSerialization.h"
+#include <string>
+#include <vector>
+#include <memory>
 #include <functional>
+#include <unordered_map>
+
+// Forward declarations
+struct GLFWwindow;
 
 namespace DRX::Editor {
 
 // ============================================================================
-// Editor Konfiguration
+// Type Aliases
 // ============================================================================
+using String = std::string;
+template<typename T> using Array = std::vector<T>;
+template<typename T> using UniquePtr = std::unique_ptr<T>;
+template<typename K, typename V> using HashMap = std::unordered_map<K, V>;
+using uint32 = unsigned int;
+using uint64 = unsigned long long;
+using int32 = int;
+using float32 = float;
 
+// ============================================================================
+// Math Types (simplified for editor)
+// ============================================================================
+namespace Math {
+    struct Vector2 { float x = 0, y = 0; };
+    struct Vector3 {
+        float x = 0, y = 0, z = 0;
+        static Vector3 Zero() { return {0, 0, 0}; }
+        static Vector3 One() { return {1, 1, 1}; }
+        Vector3 operator+(const Vector3& v) const { return {x+v.x, y+v.y, z+v.z}; }
+        Vector3 operator-(const Vector3& v) const { return {x-v.x, y-v.y, z-v.z}; }
+        Vector3 operator*(float f) const { return {x*f, y*f, z*f}; }
+    };
+    struct Vector4 { float x = 0, y = 0, z = 0, w = 1; };
+    struct Quaternion {
+        float x = 0, y = 0, z = 0, w = 1;
+        static Quaternion Identity() { return {0, 0, 0, 1}; }
+        Vector3 ToEuler() const { return {0, 0, 0}; } // Simplified
+        static Quaternion FromEuler(const Vector3& euler) { return Identity(); }
+    };
+    struct Transform {
+        Vector3 position;
+        Quaternion rotation;
+        Vector3 scale = Vector3::One();
+    };
+}
+
+// ============================================================================
+// Scene Data Structures
+// ============================================================================
+namespace Scene {
+    struct ComponentData {
+        String type;
+        bool enabled = true;
+        HashMap<String, String> properties;
+    };
+
+    struct EntityData {
+        uint64 id = 0;
+        String name;
+        bool enabled = true;
+        uint64 parent_id = 0;
+        Math::Transform transform;
+        Array<ComponentData> components;
+        Array<String> tags;
+    };
+
+    struct SceneData {
+        String name = "Untitled Scene";
+        String version = "1.0";
+        Array<EntityData> entities;
+    };
+}
+
+// ============================================================================
+// Editor Configuration
+// ============================================================================
 struct EditorConfig {
     String window_title = "DRX Engine Editor";
     uint32 window_width = 1920;
     uint32 window_height = 1080;
     bool vsync = true;
     bool dark_mode = true;
-    String last_project_path;
-    String last_scene_path;
 };
 
 // ============================================================================
-// Editor Panel Basis
+// Asset Browser Types
 // ============================================================================
-
-class EditorPanel {
-public:
-    virtual ~EditorPanel() = default;
-
-    virtual void OnInit() {}
-    virtual void OnShutdown() {}
-    virtual void OnUpdate(float32 delta_time) {}
-    virtual void OnRender() = 0;
-
-    void SetVisible(bool visible) { visible_ = visible; }
-    bool IsVisible() const { return visible_; }
-
-    const String& GetName() const { return name_; }
-
-protected:
-    String name_ = "Panel";
-    bool visible_ = true;
-    bool focused_ = false;
-};
-
-// ============================================================================
-// Szenen-Hierarchie Panel - Zeigt alle Objekte im Spiel
-// ============================================================================
-
-class HierarchyPanel : public EditorPanel {
-public:
-    HierarchyPanel();
-
-    void OnRender() override;
-
-    void SetScene(Scene::SceneData* scene) { scene_ = scene; }
-    Scene::EntityData* GetSelectedEntity() { return selected_entity_; }
-
-    // Callbacks
-    std::function<void(Scene::EntityData*)> on_entity_selected;
-    std::function<void()> on_entity_created;
-    std::function<void(uint64)> on_entity_deleted;
-
-private:
-    void DrawEntityNode(Scene::EntityData& entity);
-    void DrawContextMenu();
-
-    Scene::SceneData* scene_ = nullptr;
-    Scene::EntityData* selected_entity_ = nullptr;
-    uint64 dragged_entity_id_ = 0;
-};
-
-// ============================================================================
-// Inspector Panel - Bearbeite Eigenschaften des ausgewählten Objekts
-// ============================================================================
-
-class InspectorPanel : public EditorPanel {
-public:
-    InspectorPanel();
-
-    void OnRender() override;
-
-    void SetSelectedEntity(Scene::EntityData* entity) { entity_ = entity; }
-
-private:
-    void DrawTransformComponent();
-    void DrawComponents();
-    void DrawAddComponentButton();
-
-    Scene::EntityData* entity_ = nullptr;
-};
-
-// ============================================================================
-// Asset Browser - Durchsuche und importiere Dateien
-// ============================================================================
-
 struct AssetItem {
     String name;
     String path;
@@ -110,97 +104,13 @@ struct AssetItem {
     uint64 size = 0;
 
     enum class Type {
-        Unknown,
-        Folder,
-        Texture,
-        Model,
-        Audio,
-        Script,
-        Scene,
-        Prefab,
-        Shader,
-        Material
+        Unknown, Folder, Texture, Model, Audio, Script, Scene, Prefab, Shader, Material
     } type = Type::Unknown;
 };
 
-class AssetBrowserPanel : public EditorPanel {
-public:
-    AssetBrowserPanel();
-
-    void OnRender() override;
-
-    void SetRootPath(const String& path);
-    void Refresh();
-
-    std::function<void(const AssetItem&)> on_asset_selected;
-    std::function<void(const AssetItem&)> on_asset_double_clicked;
-
-private:
-    void ScanDirectory(const String& path);
-    void DrawPathBar();
-    void DrawAssetGrid();
-    void DrawAssetItem(const AssetItem& item, int index);
-    AssetItem::Type GetAssetType(const String& extension);
-    const char* GetAssetIcon(AssetItem::Type type);
-
-    String root_path_;
-    String current_path_;
-    Array<AssetItem> current_items_;
-    Array<String> path_history_;
-    int selected_index_ = -1;
-    float icon_size_ = 80.0f;
-};
-
 // ============================================================================
-// Viewport Panel - 3D Ansicht der Szene
+// Console Message
 // ============================================================================
-
-class ViewportPanel : public EditorPanel {
-public:
-    ViewportPanel();
-
-    void OnRender() override;
-    void OnUpdate(float32 delta_time) override;
-
-    void SetRenderTexture(void* texture_id) { render_texture_ = texture_id; }
-
-    // Gizmo Modus
-    enum class GizmoMode { Translate, Rotate, Scale };
-    void SetGizmoMode(GizmoMode mode) { gizmo_mode_ = mode; }
-    GizmoMode GetGizmoMode() const { return gizmo_mode_; }
-
-    // Kamera
-    Math::Vector3 GetCameraPosition() const { return camera_position_; }
-    Math::Vector3 GetCameraRotation() const { return camera_rotation_; }
-
-    std::function<void(Scene::EntityData*, const Math::Vector3&)> on_entity_moved;
-
-private:
-    void HandleCameraInput(float32 delta_time);
-    void DrawToolbar();
-    void DrawGizmos();
-    void DrawGrid();
-
-    void* render_texture_ = nullptr;
-    GizmoMode gizmo_mode_ = GizmoMode::Translate;
-
-    // Kamera
-    Math::Vector3 camera_position_ = {0, 5, -10};
-    Math::Vector3 camera_rotation_ = {20, 0, 0};  // Pitch, Yaw, Roll
-    float32 camera_speed_ = 10.0f;
-    float32 camera_sensitivity_ = 0.3f;
-
-    // Viewport State
-    bool is_focused_ = false;
-    bool is_hovered_ = false;
-    Math::Vector2 viewport_size_ = {800, 600};
-    Math::Vector2 viewport_bounds_[2];
-};
-
-// ============================================================================
-// Console Panel - Zeigt Logs und erlaubt Befehle
-// ============================================================================
-
 struct ConsoleMessage {
     enum class Level { Info, Warning, Error, Debug };
     Level level;
@@ -209,141 +119,9 @@ struct ConsoleMessage {
     int count = 1;
 };
 
-class ConsolePanel : public EditorPanel {
-public:
-    ConsolePanel();
-
-    void OnRender() override;
-
-    void AddLog(ConsoleMessage::Level level, const String& message);
-    void Clear();
-
-    static ConsolePanel& Instance();
-
-private:
-    void DrawToolbar();
-    void DrawMessages();
-    void DrawInputField();
-    void ExecuteCommand(const String& command);
-
-    Array<ConsoleMessage> messages_;
-    char input_buffer_[256] = {0};
-    bool scroll_to_bottom_ = true;
-    bool show_info_ = true;
-    bool show_warnings_ = true;
-    bool show_errors_ = true;
-};
-
 // ============================================================================
-// Toolbar - Hauptwerkzeugleiste
+// Editor Application - Main Class
 // ============================================================================
-
-class Toolbar {
-public:
-    void OnRender();
-
-    bool IsPlaying() const { return is_playing_; }
-    bool IsPaused() const { return is_paused_; }
-
-    std::function<void()> on_play;
-    std::function<void()> on_pause;
-    std::function<void()> on_stop;
-    std::function<void()> on_step;
-
-private:
-    bool is_playing_ = false;
-    bool is_paused_ = false;
-};
-
-// ============================================================================
-// Hauptmenü
-// ============================================================================
-
-class MainMenu {
-public:
-    void OnRender();
-
-    // File Menü Callbacks
-    std::function<void()> on_new_scene;
-    std::function<void()> on_open_scene;
-    std::function<void()> on_save_scene;
-    std::function<void()> on_save_scene_as;
-    std::function<void()> on_exit;
-
-    // Edit Menü Callbacks
-    std::function<void()> on_undo;
-    std::function<void()> on_redo;
-    std::function<void()> on_copy;
-    std::function<void()> on_paste;
-    std::function<void()> on_duplicate;
-    std::function<void()> on_delete;
-
-    // GameObject Menü Callbacks
-    std::function<void()> on_create_empty;
-    std::function<void()> on_create_cube;
-    std::function<void()> on_create_sphere;
-    std::function<void()> on_create_plane;
-    std::function<void()> on_create_light;
-    std::function<void()> on_create_camera;
-
-    // Window Menü Callbacks
-    std::function<void(bool)> on_toggle_hierarchy;
-    std::function<void(bool)> on_toggle_inspector;
-    std::function<void(bool)> on_toggle_asset_browser;
-    std::function<void(bool)> on_toggle_console;
-
-private:
-    void DrawFileMenu();
-    void DrawEditMenu();
-    void DrawGameObjectMenu();
-    void DrawWindowMenu();
-    void DrawHelpMenu();
-
-    bool show_hierarchy_ = true;
-    bool show_inspector_ = true;
-    bool show_asset_browser_ = true;
-    bool show_console_ = true;
-};
-
-// ============================================================================
-// Dialog Fenster
-// ============================================================================
-
-class DialogManager {
-public:
-    static DialogManager& Instance();
-
-    void ShowOpenFileDialog(const String& title, const Array<String>& filters,
-                            std::function<void(const String&)> callback);
-    void ShowSaveFileDialog(const String& title, const Array<String>& filters,
-                            std::function<void(const String&)> callback);
-    void ShowMessageBox(const String& title, const String& message);
-    void ShowConfirmDialog(const String& title, const String& message,
-                           std::function<void(bool)> callback);
-
-    void OnRender();
-
-private:
-    struct DialogState {
-        bool open = false;
-        String title;
-        String message;
-        Array<String> filters;
-        std::function<void(const String&)> file_callback;
-        std::function<void(bool)> confirm_callback;
-        char path_buffer[512] = {0};
-    };
-
-    DialogState open_dialog_;
-    DialogState save_dialog_;
-    DialogState message_dialog_;
-    DialogState confirm_dialog_;
-};
-
-// ============================================================================
-// Editor Application - Hauptklasse
-// ============================================================================
-
 class EditorApplication {
 public:
     static EditorApplication& Instance();
@@ -352,7 +130,7 @@ public:
     void Shutdown();
     void Run();
 
-    // Szenen Management
+    // Scene Management
     void NewScene();
     void OpenScene(const String& path);
     void SaveScene();
@@ -368,16 +146,16 @@ public:
     void DeleteEntity(uint64 entity_id);
     void DuplicateEntity(uint64 entity_id);
 
-    // Playmode
+    // Play Mode
     void Play();
     void Pause();
     void Stop();
-    void Step();
     bool IsPlaying() const { return is_playing_; }
 
-    // Undo/Redo
-    void Undo();
-    void Redo();
+    // Console
+    void Log(const String& message);
+    void LogWarning(const String& message);
+    void LogError(const String& message);
 
     // Getters
     Scene::SceneData* GetCurrentScene() { return &current_scene_; }
@@ -387,43 +165,89 @@ public:
 private:
     EditorApplication() = default;
 
-    void SetupUI();
-    void SetupCallbacks();
-    void Update(float32 delta_time);
+    bool InitWindow();
+    bool InitImGui();
+    void ShutdownImGui();
+    void ShutdownWindow();
+
+    void Update();
     void Render();
-    void RenderDockspace();
+    void RenderUI();
+
+    // UI Panels
+    void RenderMainMenu();
+    void RenderToolbar();
+    void RenderHierarchy();
+    void RenderInspector();
+    void RenderAssetBrowser();
+    void RenderViewport();
+    void RenderConsole();
+
+    // Helpers
+    void RenderEntityNode(Scene::EntityData& entity);
+    void RenderTransformComponent();
+    void RenderComponents();
+    void RenderAddComponentPopup();
+    void AddLog(ConsoleMessage::Level level, const String& message);
+    const char* GetComponentIcon(const String& type);
+    AssetItem::Type GetAssetType(const String& extension);
+    const char* GetAssetIcon(AssetItem::Type type);
+    void ScanDirectory(const String& path);
     void HandleShortcuts();
 
+    // GLFW
+    GLFWwindow* window_ = nullptr;
+
+    // State
     EditorConfig config_;
     bool running_ = false;
     bool is_playing_ = false;
     bool is_paused_ = false;
 
-    // Aktuelle Szene
+    // Scene
     Scene::SceneData current_scene_;
     Scene::EntityData* selected_entity_ = nullptr;
     String current_scene_path_;
     bool scene_modified_ = false;
-
-    // UI Panels
-    UniquePtr<HierarchyPanel> hierarchy_panel_;
-    UniquePtr<InspectorPanel> inspector_panel_;
-    UniquePtr<AssetBrowserPanel> asset_browser_panel_;
-    UniquePtr<ViewportPanel> viewport_panel_;
-    UniquePtr<ConsolePanel> console_panel_;
-    UniquePtr<MainMenu> main_menu_;
-    UniquePtr<Toolbar> toolbar_;
-
-    // Entity ID Counter
     uint64 next_entity_id_ = 1;
+
+    // UI State
+    bool show_hierarchy_ = true;
+    bool show_inspector_ = true;
+    bool show_asset_browser_ = true;
+    bool show_console_ = true;
+    bool show_viewport_ = true;
+    bool show_demo_window_ = false;
+
+    // Viewport
+    float camera_pos_[3] = {0, 5, -10};
+    float camera_rot_[2] = {20, 0}; // pitch, yaw
+    float camera_speed_ = 10.0f;
+    bool viewport_focused_ = false;
+
+    // Asset Browser
+    String asset_root_path_ = "./Assets";
+    String asset_current_path_ = "./Assets";
+    Array<AssetItem> asset_items_;
+    int selected_asset_ = -1;
+    float icon_size_ = 80.0f;
+
+    // Console
+    Array<ConsoleMessage> console_messages_;
+    char console_input_[256] = {0};
+    bool console_scroll_to_bottom_ = true;
+    bool show_info_ = true;
+    bool show_warnings_ = true;
+    bool show_errors_ = true;
+
+    // Gizmo
+    enum class GizmoMode { Translate, Rotate, Scale };
+    GizmoMode gizmo_mode_ = GizmoMode::Translate;
 };
 
-// ============================================================================
-// Logging Makros für Editor
-// ============================================================================
-
-#define EDITOR_LOG(msg) DRX::Editor::ConsolePanel::Instance().AddLog(DRX::Editor::ConsoleMessage::Level::Info, msg)
-#define EDITOR_WARN(msg) DRX::Editor::ConsolePanel::Instance().AddLog(DRX::Editor::ConsoleMessage::Level::Warning, msg)
-#define EDITOR_ERROR(msg) DRX::Editor::ConsolePanel::Instance().AddLog(DRX::Editor::ConsoleMessage::Level::Error, msg)
+// Convenience macros
+#define EDITOR_LOG(msg) DRX::Editor::EditorApplication::Instance().Log(msg)
+#define EDITOR_WARN(msg) DRX::Editor::EditorApplication::Instance().LogWarning(msg)
+#define EDITOR_ERROR(msg) DRX::Editor::EditorApplication::Instance().LogError(msg)
 
 } // namespace DRX::Editor
