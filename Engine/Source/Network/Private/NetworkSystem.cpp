@@ -5,931 +5,907 @@
 #include "Network/Public/NetworkSystem.h"
 #include "Core/Public/Log.h"
 
+#include <algorithm>
+#include <atomic>
+#include <cmath>
 #include <cstring>
-#include <chrono>
+#include <mutex>
 
 #ifdef _WIN32
     #include <winsock2.h>
     #include <ws2tcpip.h>
     #pragma comment(lib, "ws2_32.lib")
-    typedef int socklen_t;
 #else
-    #include <sys/socket.h>
-    #include <netinet/in.h>
-    #include <netinet/tcp.h>
     #include <arpa/inet.h>
-    #include <unistd.h>
+    #include <cerrno>
     #include <fcntl.h>
     #include <netdb.h>
-    #define closesocket close
-    #define INVALID_SOCKET -1
-    #define SOCKET_ERROR -1
+    #include <netinet/in.h>
+    #include <sys/socket.h>
+    #include <unistd.h>
 #endif
 
 namespace DRX::Network {
 
-// Helper to get current time in ms
-static uint64 GetTimeMs() {
-    return std::chrono::duration_cast<std::chrono::milliseconds>(
-        std::chrono::steady_clock::now().time_since_epoch()
-    ).count();
+namespace {
+
+enum PacketType : uint8 {
+    kConnectRequest = 1,
+    kConnectAccept = 2,
+    kConnectDenied = 3,
+    kDisconnect = 4,
+    kPayload = 5
+};
+
+#ifdef _WIN32
+using SocketHandle = SOCKET;
+constexpr SocketHandle kInvalidSocket = INVALID_SOCKET;
+#else
+using SocketHandle = int;
+constexpr SocketHandle kInvalidSocket = -1;
+#endif
+
+SocketHandle ToHandle(uint64 h) { return static_cast<SocketHandle>(h); }
+
+// Reference-counted platform socket initialization (WSAStartup on Windows)
+bool AcquireSockets() {
+#ifdef _WIN32
+    static std::mutex mutex;
+    static int users = 0;
+    std::lock_guard<std::mutex> lock(mutex);
+    if (users++ == 0) {
+        WSADATA data;
+        if (WSAStartup(MAKEWORD(2, 2), &data) != 0) {
+            --users;
+            return false;
+        }
+    }
+#endif
+    return true;
 }
 
-// ============================================================================
-// NetworkAddress
-// ============================================================================
+void ReleaseSockets() {
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
 
-NetworkAddress NetworkAddress::Parse(const String& str) {
-    NetworkAddress addr;
-    size_t colon = str.rfind(':');
-    if (colon != String::npos) {
-        addr.host = str.substr(0, colon);
-        addr.port = static_cast<uint16>(std::stoi(str.substr(colon + 1)));
-    } else {
-        addr.host = str;
-    }
+sockaddr_in ToSockaddr(const Address& address) {
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(address.ip);
+    addr.sin_port = htons(address.port);
     return addr;
 }
 
-// ============================================================================
-// UDPSocket Implementation
-// ============================================================================
-
-UDPSocket::UDPSocket() {
-#ifdef _WIN32
-    static bool wsa_initialized = false;
-    if (!wsa_initialized) {
-        WSADATA wsa_data;
-        WSAStartup(MAKEWORD(2, 2), &wsa_data);
-        wsa_initialized = true;
-    }
-#endif
-
-    socket_fd_ = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+uint64 RandomNonce() {
+    static std::atomic<uint64> counter{0};
+    std::random_device device;
+    return (static_cast<uint64>(device()) << 32) ^ device() ^ (++counter * 0x9E3779B97F4A7C15ull);
 }
 
-UDPSocket::~UDPSocket() {
+} // namespace
+
+// ============================================================================
+// Address
+// ============================================================================
+
+Address Address::FromIPv4(uint8 a, uint8 b, uint8 c, uint8 d, uint16 port) {
+    Address address;
+    address.ip = (static_cast<uint32>(a) << 24) | (static_cast<uint32>(b) << 16) | (static_cast<uint32>(c) << 8) | d;
+    address.port = port;
+    return address;
+}
+
+bool Address::Parse(const String& text, Address& out) {
+    const size_t colon = text.rfind(':');
+    if (colon == String::npos || colon == 0 || colon + 1 >= text.size()) return false;
+
+    const String host = text.substr(0, colon);
+    const String port_text = text.substr(colon + 1);
+    char* end = nullptr;
+    const unsigned long port = std::strtoul(port_text.c_str(), &end, 10);
+    if (*end != '\0' || port == 0 || port > 65535) return false;
+
+    in_addr parsed{};
+    if (inet_pton(AF_INET, host.c_str(), &parsed) == 1) {
+        out.ip = ntohl(parsed.s_addr);
+        out.port = static_cast<uint16>(port);
+        return true;
+    }
+
+    if (!AcquireSockets()) return false;
+    addrinfo hints{};
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_DGRAM;
+    addrinfo* result = nullptr;
+    const bool ok = getaddrinfo(host.c_str(), nullptr, &hints, &result) == 0 && result;
+    if (ok) {
+        out.ip = ntohl(reinterpret_cast<sockaddr_in*>(result->ai_addr)->sin_addr.s_addr);
+        out.port = static_cast<uint16>(port);
+        freeaddrinfo(result);
+    }
+    ReleaseSockets();
+    return ok;
+}
+
+String Address::ToString() const {
+    return fmt::format("{}.{}.{}.{}:{}", (ip >> 24) & 0xFF, (ip >> 16) & 0xFF, (ip >> 8) & 0xFF, ip & 0xFF, port);
+}
+
+// ============================================================================
+// UdpSocket
+// ============================================================================
+
+UdpSocket::~UdpSocket() {
     Close();
 }
 
-bool UDPSocket::Bind(uint16 port) {
-    if (socket_fd_ < 0) return false;
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
-    addr.sin_port = htons(port);
-
-    if (bind(socket_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
-        return false;
-    }
-
-    local_port_ = port;
-    return true;
-}
-
-bool UDPSocket::Connect(const NetworkAddress& address) {
-    if (socket_fd_ < 0) return false;
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(address.port);
-    inet_pton(AF_INET, address.host.c_str(), &addr.sin_addr);
-
-    return connect(socket_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != SOCKET_ERROR;
-}
-
-void UDPSocket::Close() {
-    if (socket_fd_ >= 0) {
-        closesocket(socket_fd_);
-        socket_fd_ = -1;
-    }
-}
-
-int32 UDPSocket::Send(const void* data, uint32 size) {
-    return send(socket_fd_, static_cast<const char*>(data), size, 0);
-}
-
-int32 UDPSocket::SendTo(const void* data, uint32 size, const NetworkAddress& address) {
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(address.port);
-    inet_pton(AF_INET, address.host.c_str(), &addr.sin_addr);
-
-    return sendto(socket_fd_, static_cast<const char*>(data), size, 0,
-                  reinterpret_cast<sockaddr*>(&addr), sizeof(addr));
-}
-
-int32 UDPSocket::Receive(void* buffer, uint32 buffer_size, NetworkAddress& sender) {
-    sockaddr_in addr{};
-    socklen_t addr_len = sizeof(addr);
-
-    int32 received = recvfrom(socket_fd_, static_cast<char*>(buffer), buffer_size, 0,
-                              reinterpret_cast<sockaddr*>(&addr), &addr_len);
-
-    if (received > 0) {
-        char ip[INET_ADDRSTRLEN];
-        inet_ntop(AF_INET, &addr.sin_addr, ip, INET_ADDRSTRLEN);
-        sender.host = ip;
-        sender.port = ntohs(addr.sin_port);
-    }
-
-    return received;
-}
-
-void UDPSocket::SetNonBlocking(bool non_blocking) {
-#ifdef _WIN32
-    u_long mode = non_blocking ? 1 : 0;
-    ioctlsocket(socket_fd_, FIONBIO, &mode);
-#else
-    int flags = fcntl(socket_fd_, F_GETFL, 0);
-    if (non_blocking) {
-        fcntl(socket_fd_, F_SETFL, flags | O_NONBLOCK);
-    } else {
-        fcntl(socket_fd_, F_SETFL, flags & ~O_NONBLOCK);
-    }
-#endif
-}
-
-void UDPSocket::SetBroadcast(bool enable) {
-    int opt = enable ? 1 : 0;
-    setsockopt(socket_fd_, SOL_SOCKET, SO_BROADCAST, reinterpret_cast<char*>(&opt), sizeof(opt));
-}
-
-// ============================================================================
-// TCPSocket Implementation
-// ============================================================================
-
-TCPSocket::TCPSocket() {
-#ifdef _WIN32
-    static bool wsa_initialized = false;
-    if (!wsa_initialized) {
-        WSADATA wsa_data;
-        WSAStartup(MAKEWORD(2, 2), &wsa_data);
-        wsa_initialized = true;
-    }
-#endif
-
-    socket_fd_ = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-}
-
-TCPSocket::~TCPSocket() {
+bool UdpSocket::Open(uint16 port) {
     Close();
-}
+    if (!AcquireSockets()) {
+        DRX_LOG_ERROR("Socket subsystem unavailable");
+        return false;
+    }
 
-bool TCPSocket::Bind(uint16 port) {
-    if (socket_fd_ < 0) return false;
-
-    int opt = 1;
-    setsockopt(socket_fd_, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<char*>(&opt), sizeof(opt));
+    const SocketHandle handle = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (handle == kInvalidSocket) {
+        ReleaseSockets();
+        DRX_LOG_ERROR("Failed to create UDP socket");
+        return false;
+    }
 
     sockaddr_in addr{};
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = INADDR_ANY;
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
     addr.sin_port = htons(port);
-
-    if (bind(socket_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == SOCKET_ERROR) {
-        return false;
-    }
-
-    local_port_ = port;
-    return true;
-}
-
-bool TCPSocket::Connect(const NetworkAddress& address) {
-    if (socket_fd_ < 0) return false;
-
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(address.port);
-    inet_pton(AF_INET, address.host.c_str(), &addr.sin_addr);
-
-    return connect(socket_fd_, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != SOCKET_ERROR;
-}
-
-void TCPSocket::Close() {
-    if (socket_fd_ >= 0) {
-        closesocket(socket_fd_);
-        socket_fd_ = -1;
-    }
-}
-
-bool TCPSocket::Listen(int32 backlog) {
-    return listen(socket_fd_, backlog) != SOCKET_ERROR;
-}
-
-SharedPtr<TCPSocket> TCPSocket::Accept() {
-    sockaddr_in addr{};
-    socklen_t addr_len = sizeof(addr);
-
-    int client_fd = accept(socket_fd_, reinterpret_cast<sockaddr*>(&addr), &addr_len);
-    if (client_fd < 0) return nullptr;
-
-    auto client = MakeShared<TCPSocket>();
-    client->socket_fd_ = client_fd;
-    return client;
-}
-
-int32 TCPSocket::Send(const void* data, uint32 size) {
-    return send(socket_fd_, static_cast<const char*>(data), size, 0);
-}
-
-int32 TCPSocket::SendTo(const void* data, uint32 size, const NetworkAddress& address) {
-    return Send(data, size);  // TCP is connection-oriented
-}
-
-int32 TCPSocket::Receive(void* buffer, uint32 buffer_size, NetworkAddress& sender) {
-    return recv(socket_fd_, static_cast<char*>(buffer), buffer_size, 0);
-}
-
-void TCPSocket::SetNonBlocking(bool non_blocking) {
+    if (bind(handle, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        DRX_LOG_ERROR("Failed to bind UDP port {}", port);
 #ifdef _WIN32
-    u_long mode = non_blocking ? 1 : 0;
-    ioctlsocket(socket_fd_, FIONBIO, &mode);
+        closesocket(handle);
 #else
-    int flags = fcntl(socket_fd_, F_GETFL, 0);
-    if (non_blocking) {
-        fcntl(socket_fd_, F_SETFL, flags | O_NONBLOCK);
-    } else {
-        fcntl(socket_fd_, F_SETFL, flags & ~O_NONBLOCK);
-    }
+        close(handle);
 #endif
-}
-
-void TCPSocket::SetNoDelay(bool no_delay) {
-    int opt = no_delay ? 1 : 0;
-    setsockopt(socket_fd_, IPPROTO_TCP, TCP_NODELAY, reinterpret_cast<char*>(&opt), sizeof(opt));
-}
-
-// ============================================================================
-// NetworkPeer Implementation
-// ============================================================================
-
-NetworkPeer::NetworkPeer(uint32 id, const NetworkAddress& address)
-    : id_(id), address_(address) {
-    info_.id = id;
-    info_.address = address;
-}
-
-NetworkPeer::~NetworkPeer() = default;
-
-void NetworkPeer::Update(float32 delta_time) {
-    ResendUnacked();
-}
-
-void NetworkPeer::Send(const void* data, uint32 size, uint32 channel, PacketReliability reliability) {
-    // Add packet header and queue for sending
-    Array<uint8> packet;
-    packet.reserve(size + 12);
-
-    // Header: sequence(4) + ack(4) + ack_bits(4) + data
-    uint32 seq = local_sequence_++;
-
-    packet.push_back((seq >> 0) & 0xFF);
-    packet.push_back((seq >> 8) & 0xFF);
-    packet.push_back((seq >> 16) & 0xFF);
-    packet.push_back((seq >> 24) & 0xFF);
-
-    packet.push_back((remote_sequence_ >> 0) & 0xFF);
-    packet.push_back((remote_sequence_ >> 8) & 0xFF);
-    packet.push_back((remote_sequence_ >> 16) & 0xFF);
-    packet.push_back((remote_sequence_ >> 24) & 0xFF);
-
-    packet.push_back((ack_bits_ >> 0) & 0xFF);
-    packet.push_back((ack_bits_ >> 8) & 0xFF);
-    packet.push_back((ack_bits_ >> 16) & 0xFF);
-    packet.push_back((ack_bits_ >> 24) & 0xFF);
-
-    const uint8* src = static_cast<const uint8*>(data);
-    packet.insert(packet.end(), src, src + size);
-
-    if (reliability >= PacketReliability::Reliable) {
-        PendingPacket pending;
-        pending.data = packet;
-        pending.sequence = seq;
-        pending.send_time = GetTimeMs();
-        pending.resend_count = 0;
-        pending_acks_.push_back(pending);
-    }
-
-    info_.packets_sent++;
-    info_.bytes_sent += packet.size();
-}
-
-void NetworkPeer::OnPacketReceived(const uint8* data, uint32 size) {
-    if (size < 12) return;
-
-    // Parse header
-    uint32 seq = data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24);
-    uint32 ack = data[4] | (data[5] << 8) | (data[6] << 16) | (data[7] << 24);
-    uint32 ack_bits = data[8] | (data[9] << 8) | (data[10] << 16) | (data[11] << 24);
-
-    // Update remote sequence
-    if (seq > remote_sequence_) {
-        uint32 diff = seq - remote_sequence_;
-        ack_bits_ = (ack_bits_ << diff) | 1;
-        remote_sequence_ = seq;
-    } else if (seq < remote_sequence_) {
-        uint32 diff = remote_sequence_ - seq;
-        if (diff < 32) {
-            ack_bits_ |= (1 << diff);
-        }
-    }
-
-    // Process acks
-    for (auto it = pending_acks_.begin(); it != pending_acks_.end();) {
-        bool acked = false;
-        if (it->sequence == ack) {
-            acked = true;
-        } else if (it->sequence < ack) {
-            uint32 diff = ack - it->sequence;
-            if (diff < 32 && (ack_bits & (1 << diff))) {
-                acked = true;
-            }
-        }
-
-        if (acked) {
-            float32 rtt = static_cast<float32>(GetTimeMs() - it->send_time);
-            UpdateRTT(rtt);
-            it = pending_acks_.erase(it);
-        } else {
-            ++it;
-        }
-    }
-
-    info_.last_receive_time = GetTimeMs();
-    info_.packets_received++;
-    info_.bytes_received += size;
-}
-
-void NetworkPeer::ResendUnacked() {
-    uint64 now = GetTimeMs();
-    float32 timeout = rtt_smoothed_ + 4 * rtt_variance_;
-
-    for (auto& pending : pending_acks_) {
-        if (now - pending.send_time > static_cast<uint64>(timeout)) {
-            // Resend
-            pending.send_time = now;
-            pending.resend_count++;
-        }
-    }
-}
-
-void NetworkPeer::UpdateRTT(float32 rtt) {
-    const float32 alpha = 0.125f;
-    const float32 beta = 0.25f;
-
-    float32 diff = std::abs(rtt - rtt_smoothed_);
-    rtt_variance_ = (1 - beta) * rtt_variance_ + beta * diff;
-    rtt_smoothed_ = (1 - alpha) * rtt_smoothed_ + alpha * rtt;
-
-    info_.rtt = rtt_smoothed_;
-}
-
-// ============================================================================
-// NetworkServer Implementation
-// ============================================================================
-
-NetworkServer::NetworkServer() = default;
-
-NetworkServer::~NetworkServer() {
-    Stop();
-}
-
-bool NetworkServer::Start(uint16 port, uint32 max_clients) {
-    max_clients_ = max_clients;
-
-    socket_ = MakeUnique<UDPSocket>();
-    if (!socket_->Bind(port)) {
-        DRX_LOG_ERROR("Failed to bind server to port {}", port);
+        ReleaseSockets();
         return false;
     }
 
-    socket_->SetNonBlocking(true);
+#ifdef _WIN32
+    u_long non_blocking = 1;
+    ioctlsocket(handle, FIONBIO, &non_blocking);
+#else
+    fcntl(handle, F_SETFL, fcntl(handle, F_GETFL, 0) | O_NONBLOCK);
+#endif
 
-    running_ = true;
-    receive_thread_ = std::thread(&NetworkServer::ReceiveThread, this);
-
-    DRX_LOG_INFO("Server started on port {}", port);
+    sockaddr_in bound{};
+    socklen_t length = sizeof(bound);
+    getsockname(handle, reinterpret_cast<sockaddr*>(&bound), &length);
+    port_ = ntohs(bound.sin_port);
+    handle_ = static_cast<uint64>(handle);
     return true;
 }
 
-void NetworkServer::Stop() {
-    running_ = false;
-
-    if (receive_thread_.joinable()) {
-        receive_thread_.join();
-    }
-
-    clients_.clear();
-    address_to_client_.clear();
-
-    if (socket_) {
-        socket_->Close();
-        socket_.reset();
-    }
-
-    DRX_LOG_INFO("Server stopped");
+void UdpSocket::Close() {
+    if (!IsOpen()) return;
+#ifdef _WIN32
+    closesocket(ToHandle(handle_));
+#else
+    close(ToHandle(handle_));
+#endif
+    handle_ = ~0ull;
+    port_ = 0;
+    ReleaseSockets();
 }
 
-void NetworkServer::Update(float32 delta_time) {
-    for (auto& [id, peer] : clients_) {
-        peer->Update(delta_time);
-    }
+bool UdpSocket::IsOpen() const {
+    return handle_ != ~0ull;
 }
 
-void NetworkServer::Broadcast(const void* data, uint32 size, uint32 channel,
-                               PacketReliability reliability) {
-    for (auto& [id, peer] : clients_) {
-        peer->Send(data, size, channel, reliability);
-    }
+bool UdpSocket::SendTo(const Address& to, const void* data, size_t size) {
+    if (!IsOpen()) return false;
+    const sockaddr_in addr = ToSockaddr(to);
+    const auto sent = sendto(ToHandle(handle_), static_cast<const char*>(data), static_cast<int>(size), 0,
+                             reinterpret_cast<const sockaddr*>(&addr), sizeof(addr));
+    return sent >= 0 && static_cast<size_t>(sent) == size;
 }
 
-void NetworkServer::Send(uint32 client_id, const void* data, uint32 size, uint32 channel,
-                          PacketReliability reliability) {
-    auto it = clients_.find(client_id);
-    if (it != clients_.end()) {
-        it->second->Send(data, size, channel, reliability);
+int32 UdpSocket::ReceiveFrom(Address& from, void* buffer, size_t capacity) {
+    if (!IsOpen()) return -1;
+    sockaddr_in addr{};
+    socklen_t length = sizeof(addr);
+    const auto received = recvfrom(ToHandle(handle_), static_cast<char*>(buffer), static_cast<int>(capacity), 0,
+                                   reinterpret_cast<sockaddr*>(&addr), &length);
+    if (received < 0) {
+#ifdef _WIN32
+        const int error = WSAGetLastError();
+        // Windows reports ICMP "port unreachable" from earlier sends as WSAECONNRESET; not fatal for UDP
+        if (error == WSAEWOULDBLOCK || error == WSAECONNRESET || error == WSAEMSGSIZE) return 0;
+#else
+        if (errno == EAGAIN || errno == EWOULDBLOCK || errno == ECONNREFUSED) return 0;
+#endif
+        return -1;
     }
-}
-
-void NetworkServer::Disconnect(uint32 client_id, const String& reason) {
-    RemoveClient(client_id);
-
-    NetworkEvent event;
-    event.type = NetworkEventType::Disconnected;
-    event.connection_id = client_id;
-    event.message = reason;
-
-    std::lock_guard<std::mutex> lock(events_mutex_);
-    events_.push(event);
-}
-
-uint32 NetworkServer::GetClientCount() const {
-    return static_cast<uint32>(clients_.size());
-}
-
-Array<ConnectionInfo> NetworkServer::GetConnections() const {
-    Array<ConnectionInfo> result;
-    for (const auto& [id, peer] : clients_) {
-        result.push_back(peer->GetInfo());
-    }
-    return result;
-}
-
-ConnectionInfo* NetworkServer::GetConnection(uint32 client_id) {
-    auto it = clients_.find(client_id);
-    if (it != clients_.end()) {
-        return const_cast<ConnectionInfo*>(&it->second->GetInfo());
-    }
-    return nullptr;
-}
-
-bool NetworkServer::PollEvent(NetworkEvent& event) {
-    std::lock_guard<std::mutex> lock(events_mutex_);
-    if (events_.empty()) return false;
-
-    event = events_.front();
-    events_.pop();
-    return true;
-}
-
-void NetworkServer::ReceiveThread() {
-    Array<uint8> buffer(65536);
-
-    while (running_) {
-        NetworkAddress sender;
-        int32 received = socket_->Receive(buffer.data(), buffer.size(), sender);
-
-        if (received > 0) {
-            ProcessPacket(buffer.data(), received, sender);
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-}
-
-void NetworkServer::ProcessPacket(const uint8* data, uint32 size, const NetworkAddress& sender) {
-    String addr_str = sender.ToString();
-
-    auto it = address_to_client_.find(addr_str);
-    uint32 client_id;
-
-    if (it == address_to_client_.end()) {
-        // New client
-        if (clients_.size() >= max_clients_) {
-            return;  // Server full
-        }
-
-        client_id = AddClient(sender);
-    } else {
-        client_id = it->second;
-    }
-
-    clients_[client_id]->OnPacketReceived(data, size);
-
-    // Create data event
-    NetworkEvent event;
-    event.type = NetworkEventType::DataReceived;
-    event.connection_id = client_id;
-    event.packet.data.assign(data + 12, data + size);  // Skip header
-    event.packet.sender = sender;
-
-    std::lock_guard<std::mutex> lock(events_mutex_);
-    events_.push(event);
-
-    if (on_data_received_) {
-        on_data_received_(client_id, event.packet);
-    }
-}
-
-uint32 NetworkServer::AddClient(const NetworkAddress& address) {
-    uint32 id = next_client_id_++;
-    auto peer = MakeShared<NetworkPeer>(id, address);
-    peer->SetState(ConnectionState::Connected);
-
-    clients_[id] = peer;
-    address_to_client_[address.ToString()] = id;
-
-    NetworkEvent event;
-    event.type = NetworkEventType::Connected;
-    event.connection_id = id;
-
-    {
-        std::lock_guard<std::mutex> lock(events_mutex_);
-        events_.push(event);
-    }
-
-    if (on_connected_) {
-        on_connected_(id);
-    }
-
-    DRX_LOG_INFO("Client {} connected from {}", id, address.ToString());
-    return id;
-}
-
-void NetworkServer::RemoveClient(uint32 client_id) {
-    auto it = clients_.find(client_id);
-    if (it != clients_.end()) {
-        address_to_client_.erase(it->second->GetAddress().ToString());
-        clients_.erase(it);
-
-        if (on_disconnected_) {
-            on_disconnected_(client_id, "");
-        }
-
-        DRX_LOG_INFO("Client {} disconnected", client_id);
-    }
+    from.ip = ntohl(addr.sin_addr.s_addr);
+    from.port = ntohs(addr.sin_port);
+    return static_cast<int32>(received);
 }
 
 // ============================================================================
-// NetworkClient Implementation
+// NetWriter / NetReader
 // ============================================================================
 
-NetworkClient::NetworkClient() = default;
-
-NetworkClient::~NetworkClient() {
-    Disconnect();
+void NetWriter::WriteU16(uint16 v) {
+    buffer_.push_back(static_cast<uint8>(v));
+    buffer_.push_back(static_cast<uint8>(v >> 8));
 }
 
-bool NetworkClient::Connect(const NetworkAddress& server, uint32 timeout_ms) {
-    server_address_ = server;
-    state_ = ConnectionState::Connecting;
-
-    socket_ = MakeUnique<UDPSocket>();
-    if (!socket_->Bind(0)) {
-        state_ = ConnectionState::Disconnected;
-        return false;
-    }
-
-    socket_->SetNonBlocking(true);
-
-    server_peer_ = MakeShared<NetworkPeer>(0, server);
-
-    running_ = true;
-    receive_thread_ = std::thread(&NetworkClient::ReceiveThread, this);
-
-    // Send connection request
-    uint8 connect_packet[4] = {0x01, 0x00, 0x00, 0x00};  // Connection request
-    socket_->SendTo(connect_packet, 4, server);
-
-    // Wait for connection
-    uint64 start = GetTimeMs();
-    while (state_ == ConnectionState::Connecting) {
-        if (GetTimeMs() - start > timeout_ms) {
-            Disconnect("Connection timeout");
-            return false;
-        }
-        std::this_thread::sleep_for(std::chrono::milliseconds(10));
-    }
-
-    return state_ == ConnectionState::Connected;
+void NetWriter::WriteU32(uint32 v) {
+    for (int i = 0; i < 4; ++i) buffer_.push_back(static_cast<uint8>(v >> (8 * i)));
 }
 
-void NetworkClient::Disconnect(const String& reason) {
-    if (state_ == ConnectionState::Disconnected) return;
-
-    state_ = ConnectionState::Disconnecting;
-    running_ = false;
-
-    if (receive_thread_.joinable()) {
-        receive_thread_.join();
-    }
-
-    if (socket_) {
-        socket_->Close();
-        socket_.reset();
-    }
-
-    server_peer_.reset();
-    state_ = ConnectionState::Disconnected;
-
-    if (on_disconnected_) {
-        on_disconnected_(0, reason);
-    }
-
-    DRX_LOG_INFO("Disconnected: {}", reason);
+void NetWriter::WriteU64(uint64 v) {
+    for (int i = 0; i < 8; ++i) buffer_.push_back(static_cast<uint8>(v >> (8 * i)));
 }
 
-void NetworkClient::Update(float32 delta_time) {
-    if (server_peer_) {
-        server_peer_->Update(delta_time);
-    }
-}
-
-void NetworkClient::Send(const void* data, uint32 size, uint32 channel,
-                          PacketReliability reliability) {
-    if (server_peer_ && state_ == ConnectionState::Connected) {
-        server_peer_->Send(data, size, channel, reliability);
-    }
-}
-
-const ConnectionInfo& NetworkClient::GetConnectionInfo() const {
-    static ConnectionInfo empty;
-    return server_peer_ ? server_peer_->GetInfo() : empty;
-}
-
-float32 NetworkClient::GetRTT() const {
-    return server_peer_ ? server_peer_->GetInfo().rtt : 0.0f;
-}
-
-bool NetworkClient::PollEvent(NetworkEvent& event) {
-    std::lock_guard<std::mutex> lock(events_mutex_);
-    if (events_.empty()) return false;
-
-    event = events_.front();
-    events_.pop();
-    return true;
-}
-
-void NetworkClient::ReceiveThread() {
-    Array<uint8> buffer(65536);
-
-    while (running_) {
-        NetworkAddress sender;
-        int32 received = socket_->Receive(buffer.data(), buffer.size(), sender);
-
-        if (received > 0) {
-            ProcessPacket(buffer.data(), received);
-        }
-
-        std::this_thread::sleep_for(std::chrono::milliseconds(1));
-    }
-}
-
-void NetworkClient::ProcessPacket(const uint8* data, uint32 size) {
-    if (state_ == ConnectionState::Connecting && size >= 4 && data[0] == 0x02) {
-        // Connection accepted
-        state_ = ConnectionState::Connected;
-        server_peer_->SetState(ConnectionState::Connected);
-
-        NetworkEvent event;
-        event.type = NetworkEventType::Connected;
-        event.connection_id = 0;
-
-        {
-            std::lock_guard<std::mutex> lock(events_mutex_);
-            events_.push(event);
-        }
-
-        if (on_connected_) {
-            on_connected_(0);
-        }
-
-        DRX_LOG_INFO("Connected to server");
-        return;
-    }
-
-    if (server_peer_) {
-        server_peer_->OnPacketReceived(data, size);
-
-        NetworkEvent event;
-        event.type = NetworkEventType::DataReceived;
-        event.connection_id = 0;
-        event.packet.data.assign(data + 12, data + size);
-
-        std::lock_guard<std::mutex> lock(events_mutex_);
-        events_.push(event);
-
-        if (on_data_received_) {
-            on_data_received_(0, event.packet);
-        }
-    }
-}
-
-// ============================================================================
-// NetworkWriter/Reader Implementation
-// ============================================================================
-
-void NetworkWriter::Write(bool value) { buffer_.push_back(value ? 1 : 0); }
-void NetworkWriter::Write(int8 value) { buffer_.push_back(static_cast<uint8>(value)); }
-void NetworkWriter::Write(uint8 value) { buffer_.push_back(value); }
-
-void NetworkWriter::Write(int16 value) {
-    buffer_.push_back(value & 0xFF);
-    buffer_.push_back((value >> 8) & 0xFF);
-}
-
-void NetworkWriter::Write(uint16 value) {
-    buffer_.push_back(value & 0xFF);
-    buffer_.push_back((value >> 8) & 0xFF);
-}
-
-void NetworkWriter::Write(int32 value) {
-    buffer_.push_back(value & 0xFF);
-    buffer_.push_back((value >> 8) & 0xFF);
-    buffer_.push_back((value >> 16) & 0xFF);
-    buffer_.push_back((value >> 24) & 0xFF);
-}
-
-void NetworkWriter::Write(uint32 value) {
-    buffer_.push_back(value & 0xFF);
-    buffer_.push_back((value >> 8) & 0xFF);
-    buffer_.push_back((value >> 16) & 0xFF);
-    buffer_.push_back((value >> 24) & 0xFF);
-}
-
-void NetworkWriter::Write(float32 value) {
+void NetWriter::WriteF32(float32 v) {
     uint32 bits;
-    std::memcpy(&bits, &value, sizeof(float32));
-    Write(bits);
+    std::memcpy(&bits, &v, sizeof(bits));
+    WriteU32(bits);
 }
 
-void NetworkWriter::Write(float64 value) {
-    uint64 bits;
-    std::memcpy(&bits, &value, sizeof(float64));
-    Write(bits);
+void NetWriter::WriteString(const String& v) {
+    const auto length = static_cast<uint16>(std::min<size_t>(v.size(), 65535));
+    WriteU16(length);
+    WriteBytes(v.data(), length);
 }
 
-void NetworkWriter::Write(int64 value) {
-    Write(static_cast<uint32>(value & 0xFFFFFFFF));
-    Write(static_cast<uint32>((value >> 32) & 0xFFFFFFFF));
-}
-
-void NetworkWriter::Write(uint64 value) {
-    Write(static_cast<uint32>(value & 0xFFFFFFFF));
-    Write(static_cast<uint32>((value >> 32) & 0xFFFFFFFF));
-}
-
-void NetworkWriter::Write(const String& value) {
-    Write(static_cast<uint32>(value.size()));
-    Write(value.data(), static_cast<uint32>(value.size()));
-}
-
-void NetworkWriter::Write(const void* data, uint32 size) {
-    const uint8* bytes = static_cast<const uint8*>(data);
+void NetWriter::WriteBytes(const void* data, size_t size) {
+    const auto* bytes = static_cast<const uint8*>(data);
     buffer_.insert(buffer_.end(), bytes, bytes + size);
 }
 
-bool NetworkReader::Read(bool& value) {
-    if (position_ >= size_) return false;
-    value = data_[position_++] != 0;
+void NetWriter::WriteQuantized(float32 v, float32 min, float32 max, uint32 bits) {
+    bits = std::clamp(bits, 1u, 32u);
+    const uint64 steps = (1ull << bits) - 1;
+    const float32 t = max > min ? (std::clamp(v, min, max) - min) / (max - min) : 0.0f;
+    const auto q = static_cast<uint32>(std::llround(static_cast<float64>(t) * static_cast<float64>(steps)));
+    if (bits <= 8) WriteU8(static_cast<uint8>(q));
+    else if (bits <= 16) WriteU16(static_cast<uint16>(q));
+    else WriteU32(q);
+}
+
+bool NetReader::ReadU8(uint8& v) {
+    if (GetRemaining() < 1) return false;
+    v = data_[position_++];
     return true;
 }
 
-bool NetworkReader::Read(int8& value) {
-    if (position_ >= size_) return false;
-    value = static_cast<int8>(data_[position_++]);
-    return true;
-}
-
-bool NetworkReader::Read(uint8& value) {
-    if (position_ >= size_) return false;
-    value = data_[position_++];
-    return true;
-}
-
-bool NetworkReader::Read(int16& value) {
-    if (position_ + 2 > size_) return false;
-    value = data_[position_] | (data_[position_ + 1] << 8);
+bool NetReader::ReadU16(uint16& v) {
+    if (GetRemaining() < 2) return false;
+    v = static_cast<uint16>(data_[position_] | (data_[position_ + 1] << 8));
     position_ += 2;
     return true;
 }
 
-bool NetworkReader::Read(uint16& value) {
-    if (position_ + 2 > size_) return false;
-    value = data_[position_] | (data_[position_ + 1] << 8);
-    position_ += 2;
-    return true;
-}
-
-bool NetworkReader::Read(int32& value) {
-    if (position_ + 4 > size_) return false;
-    value = data_[position_] | (data_[position_ + 1] << 8) |
-            (data_[position_ + 2] << 16) | (data_[position_ + 3] << 24);
+bool NetReader::ReadU32(uint32& v) {
+    if (GetRemaining() < 4) return false;
+    v = 0;
+    for (int i = 0; i < 4; ++i) v |= static_cast<uint32>(data_[position_ + i]) << (8 * i);
     position_ += 4;
     return true;
 }
 
-bool NetworkReader::Read(uint32& value) {
-    if (position_ + 4 > size_) return false;
-    value = data_[position_] | (data_[position_ + 1] << 8) |
-            (data_[position_ + 2] << 16) | (data_[position_ + 3] << 24);
-    position_ += 4;
+bool NetReader::ReadU64(uint64& v) {
+    if (GetRemaining() < 8) return false;
+    v = 0;
+    for (int i = 0; i < 8; ++i) v |= static_cast<uint64>(data_[position_ + i]) << (8 * i);
+    position_ += 8;
     return true;
 }
 
-bool NetworkReader::Read(float32& value) {
+bool NetReader::ReadI32(int32& v) {
+    uint32 u;
+    if (!ReadU32(u)) return false;
+    v = static_cast<int32>(u);
+    return true;
+}
+
+bool NetReader::ReadF32(float32& v) {
     uint32 bits;
-    if (!Read(bits)) return false;
-    std::memcpy(&value, &bits, sizeof(float32));
+    if (!ReadU32(bits)) return false;
+    std::memcpy(&v, &bits, sizeof(v));
     return true;
 }
 
-bool NetworkReader::Read(float64& value) {
-    uint64 bits;
-    if (!Read(bits)) return false;
-    std::memcpy(&value, &bits, sizeof(float64));
+bool NetReader::ReadBool(bool& v) {
+    uint8 b;
+    if (!ReadU8(b) || b > 1) return false;
+    v = b == 1;
     return true;
 }
 
-bool NetworkReader::Read(int64& value) {
-    uint32 low, high;
-    if (!Read(low) || !Read(high)) return false;
-    value = static_cast<int64>(low) | (static_cast<int64>(high) << 32);
+bool NetReader::ReadString(String& v, size_t max_length) {
+    uint16 length;
+    if (!ReadU16(length) || length > max_length || GetRemaining() < length) return false;
+    v.assign(reinterpret_cast<const char*>(data_ + position_), length);
+    position_ += length;
     return true;
 }
 
-bool NetworkReader::Read(uint64& value) {
-    uint32 low, high;
-    if (!Read(low) || !Read(high)) return false;
-    value = static_cast<uint64>(low) | (static_cast<uint64>(high) << 32);
+bool NetReader::ReadBytes(void* out, size_t size) {
+    if (GetRemaining() < size) return false;
+    std::memcpy(out, data_ + position_, size);
+    position_ += size;
     return true;
 }
 
-bool NetworkReader::Read(String& value) {
-    uint32 len;
-    if (!Read(len)) return false;
-    if (position_ + len > size_) return false;
-    value.assign(reinterpret_cast<const char*>(data_ + position_), len);
-    position_ += len;
+bool NetReader::ReadQuantized(float32& v, float32 min, float32 max, uint32 bits) {
+    bits = std::clamp(bits, 1u, 32u);
+    uint32 q = 0;
+    if (bits <= 8) {
+        uint8 b;
+        if (!ReadU8(b)) return false;
+        q = b;
+    } else if (bits <= 16) {
+        uint16 s;
+        if (!ReadU16(s)) return false;
+        q = s;
+    } else if (!ReadU32(q)) {
+        return false;
+    }
+    const uint64 steps = (1ull << bits) - 1;
+    if (q > steps) return false;
+    v = min + (max - min) * static_cast<float32>(static_cast<float64>(q) / static_cast<float64>(steps));
     return true;
 }
 
-bool NetworkReader::Read(void* data, uint32 size) {
-    if (position_ + size > size_) return false;
-    std::memcpy(data, data_ + position_, size);
+bool NetReader::Skip(size_t size) {
+    if (GetRemaining() < size) return false;
     position_ += size;
     return true;
 }
 
 // ============================================================================
-// RPCManager Implementation
+// Connection
 // ============================================================================
 
-RPCManager& RPCManager::Instance() {
-    static RPCManager instance;
-    return instance;
+namespace {
+constexpr size_t kPacketHeaderSize = 2 + 2 + 4 + 1;      // seq, ack, ack bits, message count
+constexpr size_t kMessageHeaderSize = 1 + 2 + 2;         // delivery, reliable id, length
+constexpr float64 kMinResendInterval = 0.05;
+constexpr uint16 kReliableWindow = 512;                  // messages in flight
+} // namespace
+
+Connection::Connection() : sent_(kWindow), received_(kWindow, -1) {}
+
+bool Connection::QueueMessage(Delivery delivery, const void* data, size_t size) {
+    if (size > kMaxMessageSize) {
+        DRX_LOG_ERROR("Network message of {} bytes exceeds the limit of {}", size, kMaxMessageSize);
+        return false;
+    }
+    const auto* bytes = static_cast<const uint8*>(data);
+    if (delivery == Delivery::Reliable) {
+        if (reliable_out_.size() >= kReliableWindow) {
+            DRX_LOG_ERROR("Reliable send window full ({} messages unacknowledged)", reliable_out_.size());
+            return false;
+        }
+        reliable_out_.push_back({next_reliable_id_++, Array<uint8>(bytes, bytes + size)});
+    } else {
+        unreliable_out_.emplace_back(bytes, bytes + size);
+        if (unreliable_out_.size() > 256) unreliable_out_.pop_front();   // stale state is worthless
+    }
+    stats_.reliable_pending = static_cast<uint32>(reliable_out_.size());
+    return true;
 }
 
-void RPCManager::RegisterRPC(const String& name, RPCHandler handler) {
-    uint32 id = next_rpc_id_++;
-    handlers_[name] = handler;
-    rpc_id_to_name_[id] = name;
-    rpc_name_to_id_[name] = id;
+bool Connection::WritePacket(float64 now, Array<uint8>& out) {
+    const float64 resend_interval = std::max(kMinResendInterval, stats_.rtt_ms * 0.0015);
+
+    // Collect what fits: reliable messages due for (re)sending first, then unreliable ones
+    Array<PendingReliable*> reliable;
+    size_t size = kPacketHeaderSize;
+    for (PendingReliable& message : reliable_out_) {
+        if (message.acked || (message.last_send_time >= 0.0 && now - message.last_send_time < resend_interval)) continue;
+        if (size + kMessageHeaderSize + message.data.size() > kMaxPacketSize || reliable.size() >= 255) break;
+        size += kMessageHeaderSize + message.data.size();
+        reliable.push_back(&message);
+    }
+    size_t unreliable_count = 0;
+    for (const auto& message : unreliable_out_) {
+        if (size + kMessageHeaderSize + message.size() > kMaxPacketSize || reliable.size() + unreliable_count >= 255) break;
+        size += kMessageHeaderSize + message.size();
+        ++unreliable_count;
+    }
+
+    const bool keep_alive_due = last_send_time_ < 0.0 || now - last_send_time_ >= keep_alive_interval;
+    if (reliable.empty() && unreliable_count == 0 && !keep_alive_due) return false;
+
+    const uint16 sequence = local_sequence_++;
+    SentPacket& record = sent_[sequence % kWindow];
+    if (record.valid && !record.acked) AccountLoss(true);   // overwritten without an ack
+    record = {};
+    record.sequence = sequence;
+    record.valid = true;
+    record.send_time = now;
+
+    NetWriter writer(out);
+    writer.WriteU16(sequence);
+    writer.WriteU16(remote_sequence_);
+    writer.WriteU32(received_bits_);
+    writer.WriteU8(static_cast<uint8>(reliable.size() + unreliable_count));
+    for (PendingReliable* message : reliable) {
+        writer.WriteU8(static_cast<uint8>(Delivery::Reliable));
+        writer.WriteU16(message->id);
+        writer.WriteU16(static_cast<uint16>(message->data.size()));
+        writer.WriteBytes(message->data.data(), message->data.size());
+        message->last_send_time = now;
+        record.reliable_ids.push_back(message->id);
+    }
+    for (size_t i = 0; i < unreliable_count; ++i) {
+        const Array<uint8>& message = unreliable_out_.front();
+        writer.WriteU8(static_cast<uint8>(Delivery::Unreliable));
+        writer.WriteU16(0);
+        writer.WriteU16(static_cast<uint16>(message.size()));
+        writer.WriteBytes(message.data(), message.size());
+        unreliable_out_.pop_front();
+    }
+
+    last_send_time_ = now;
+    ++stats_.packets_sent;
+    stats_.bytes_sent += out.size();
+    return true;
 }
 
-void RPCManager::UnregisterRPC(const String& name) {
-    auto it = rpc_name_to_id_.find(name);
-    if (it != rpc_name_to_id_.end()) {
-        rpc_id_to_name_.erase(it->second);
-        rpc_name_to_id_.erase(it);
-        handlers_.erase(name);
+bool Connection::ReadPacket(float64 now, const uint8* data, size_t size, Array<Message>& delivered) {
+    NetReader reader(data, size);
+    uint16 sequence, ack;
+    uint32 ack_bits;
+    uint8 count;
+    if (!reader.ReadU16(sequence) || !reader.ReadU16(ack) || !reader.ReadU32(ack_bits) || !reader.ReadU8(count)) {
+        return false;
+    }
+
+    // Validate the whole packet before applying anything
+    struct Parsed {
+        Delivery delivery;
+        uint16 id;
+        const uint8* bytes;
+        uint16 length;
+    };
+    Array<Parsed> messages;
+    messages.reserve(count);
+    for (uint8 i = 0; i < count; ++i) {
+        uint8 delivery;
+        uint16 id, length;
+        if (!reader.ReadU8(delivery) || delivery > 1 || !reader.ReadU16(id) || !reader.ReadU16(length) ||
+            length > kMaxMessageSize || reader.GetRemaining() < length) {
+            return false;
+        }
+        messages.push_back({static_cast<Delivery>(delivery), id, reader.GetCurrent(), length});
+        reader.Skip(length);
+    }
+    if (reader.GetRemaining() != 0) return false;
+
+    // Duplicate packets are acknowledged again but their messages are not delivered twice
+    int32& slot = received_[sequence % kWindow];
+    const bool duplicate = slot == static_cast<int32>(sequence);
+    const bool too_old = received_any_ && SequenceGreater(remote_sequence_, sequence) &&
+                         static_cast<uint16>(remote_sequence_ - sequence) >= kWindow;
+    if (too_old) return false;
+    slot = sequence;
+
+    if (!received_any_) {
+        remote_sequence_ = sequence;
+        received_bits_ = 0;
+        received_any_ = true;
+    } else if (SequenceGreater(sequence, remote_sequence_)) {
+        const uint16 shift = static_cast<uint16>(sequence - remote_sequence_);
+        received_bits_ = shift >= 32 ? 0 : (received_bits_ << shift);
+        if (shift <= 32) received_bits_ |= 1u << (shift - 1);   // previous remote_sequence_
+        remote_sequence_ = sequence;
+    } else if (sequence != remote_sequence_) {
+        const uint16 behind = static_cast<uint16>(remote_sequence_ - sequence);
+        if (behind <= 32) received_bits_ |= 1u << (behind - 1);
+    }
+
+    ProcessAck(ack, ack_bits, now);
+    last_receive_time_ = now;
+    ++stats_.packets_received;
+    stats_.bytes_received += size;
+    if (duplicate) return true;
+
+    for (const Parsed& m : messages) {
+        if (m.delivery == Delivery::Unreliable) {
+            delivered.push_back({Delivery::Unreliable, Array<uint8>(m.bytes, m.bytes + m.length)});
+            continue;
+        }
+        // Reliable: ignore already delivered ids, buffer early ones, release in order
+        if (m.id != next_expected_id_ && !SequenceGreater(m.id, next_expected_id_)) continue;
+        if (static_cast<uint16>(m.id - next_expected_id_) >= kReliableWindow) continue;
+        reliable_in_.emplace(m.id, Array<uint8>(m.bytes, m.bytes + m.length));
+        for (auto it = reliable_in_.find(next_expected_id_); it != reliable_in_.end();
+             it = reliable_in_.find(next_expected_id_)) {
+            delivered.push_back({Delivery::Reliable, std::move(it->second)});
+            reliable_in_.erase(it);
+            ++next_expected_id_;
+        }
+    }
+    return true;
+}
+
+void Connection::ProcessAck(uint16 ack, uint32 ack_bits, float64 now) {
+    auto try_ack = [&](uint16 sequence) {
+        SentPacket& packet = sent_[sequence % kWindow];
+        if (packet.valid && !packet.acked && packet.sequence == sequence) OnPacketAcked(packet, now);
+    };
+    try_ack(ack);
+    for (uint32 i = 0; i < 32; ++i) {
+        if (ack_bits & (1u << i)) try_ack(static_cast<uint16>(ack - 1 - i));
+    }
+
+    // Unacknowledged packets older than a second count as lost
+    for (SentPacket& packet : sent_) {
+        if (packet.valid && !packet.acked && now - packet.send_time > 1.0) {
+            packet.valid = false;
+            AccountLoss(true);
+        }
+    }
+
+    while (!reliable_out_.empty() && reliable_out_.front().acked) reliable_out_.pop_front();
+    stats_.reliable_pending = static_cast<uint32>(reliable_out_.size());
+}
+
+void Connection::OnPacketAcked(SentPacket& packet, float64 now) {
+    packet.acked = true;
+    AccountLoss(false);
+
+    const auto rtt = static_cast<float32>((now - packet.send_time) * 1000.0);
+    stats_.rtt_ms = stats_.rtt_ms <= 0.0f ? rtt : stats_.rtt_ms + (rtt - stats_.rtt_ms) * 0.1f;
+
+    for (uint16 id : packet.reliable_ids) {
+        for (PendingReliable& message : reliable_out_) {
+            if (message.id == id) {
+                message.acked = true;
+                break;
+            }
+        }
     }
 }
 
-void RPCManager::ProcessRPC(uint32 sender_id, const uint8* data, uint32 size) {
-    if (size < 4) return;
+void Connection::AccountLoss(bool lost) {
+    stats_.packet_loss += ((lost ? 1.0f : 0.0f) - stats_.packet_loss) * 0.05f;
+}
 
-    uint32 rpc_id = data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24);
+// ============================================================================
+// NetEndpoint
+// ============================================================================
 
-    auto it = rpc_id_to_name_.find(rpc_id);
-    if (it == rpc_id_to_name_.end()) return;
+NetEndpoint::NetEndpoint(const NetConfig& config) : config_(config), rng_(config.conditioner.seed) {}
 
-    auto handler_it = handlers_.find(it->second);
-    if (handler_it != handlers_.end()) {
-        handler_it->second(sender_id, data + 4, size - 4);
+bool NetEndpoint::PollEvent(NetEvent& event) {
+    if (events_.empty()) return false;
+    event = std::move(events_.front());
+    events_.pop_front();
+    return true;
+}
+
+void NetEndpoint::SetConditioner(const ConditionerSettings& settings) {
+    config_.conditioner = settings;
+    rng_.seed(settings.seed);
+}
+
+void NetEndpoint::WriteHeader(Array<uint8>& packet, uint8 type) const {
+    NetWriter writer(packet);
+    writer.WriteU32(config_.protocol_id);
+    writer.WriteU8(type);
+}
+
+bool NetEndpoint::ReadHeader(NetReader& reader, uint8& type) const {
+    uint32 protocol = 0;
+    return reader.ReadU32(protocol) && protocol == config_.protocol_id && reader.ReadU8(type);
+}
+
+void NetEndpoint::SendRaw(const Address& to, const Array<uint8>& packet, float64 now) {
+    const ConditionerSettings& c = config_.conditioner;
+    if (!c.IsActive()) {
+        socket_.SendTo(to, packet.data(), packet.size());
+        return;
     }
+
+    std::uniform_real_distribution<float32> unit(0.0f, 1.0f);
+    if (unit(rng_) < c.loss) return;
+    const int copies = unit(rng_) < c.duplicate ? 2 : 1;
+    for (int i = 0; i < copies; ++i) {
+        const float32 jitter = c.jitter_ms > 0.0f ? (unit(rng_) * 2.0f - 1.0f) * c.jitter_ms : 0.0f;
+        const float64 delay = std::max(0.0f, c.latency_ms + jitter) / 1000.0;
+        Delayed entry{now + delay, to, packet};
+        // Keep the queue sorted by release time (jitter may reorder packets, like real networks)
+        auto pos = std::upper_bound(delayed_.begin(), delayed_.end(), entry.release_time,
+                                    [](float64 t, const Delayed& d) { return t < d.release_time; });
+        delayed_.insert(pos, std::move(entry));
+    }
+}
+
+void NetEndpoint::FlushDelayed(float64 now) {
+    while (!delayed_.empty() && delayed_.front().release_time <= now) {
+        const Delayed& d = delayed_.front();
+        socket_.SendTo(d.to, d.data.data(), d.data.size());
+        delayed_.pop_front();
+    }
+}
+
+// ============================================================================
+// NetServer
+// ============================================================================
+
+NetServer::~NetServer() {
+    Stop();
+}
+
+bool NetServer::Start(uint16 port, uint32 max_clients) {
+    Stop();
+    if (!socket_.Open(port)) return false;
+    max_clients_ = std::max(1u, max_clients);
+    DRX_LOG_INFO("Server listening on UDP port {}", socket_.GetPort());
+    return true;
+}
+
+void NetServer::Stop() {
+    if (!socket_.IsOpen()) return;
+    Array<uint32> ids = GetClientIds();
+    for (uint32 id : ids) RemoveClient(id, "server shutdown", true);
+    socket_.Close();
+    events_.clear();
+}
+
+Array<uint32> NetServer::GetClientIds() const {
+    Array<uint32> ids;
+    for (const auto& [id, client] : clients_) ids.push_back(id);
+    return ids;
+}
+
+const ConnectionStats* NetServer::GetStats(uint32 client_id) const {
+    const auto it = clients_.find(client_id);
+    return it != clients_.end() ? &it->second.connection.GetStats() : nullptr;
+}
+
+bool NetServer::GetClientAddress(uint32 client_id, Address& out) const {
+    const auto it = clients_.find(client_id);
+    if (it == clients_.end()) return false;
+    out = it->second.address;
+    return true;
+}
+
+NetServer::Client* NetServer::FindByAddress(const Address& address) {
+    for (auto& [id, client] : clients_) {
+        if (client.address == address) return &client;
+    }
+    return nullptr;
+}
+
+bool NetServer::Send(uint32 client_id, Delivery delivery, const void* data, size_t size) {
+    const auto it = clients_.find(client_id);
+    return it != clients_.end() && it->second.connection.QueueMessage(delivery, data, size);
+}
+
+void NetServer::Broadcast(Delivery delivery, const void* data, size_t size) {
+    for (auto& [id, client] : clients_) client.connection.QueueMessage(delivery, data, size);
+}
+
+void NetServer::Disconnect(uint32 client_id, const String& reason) {
+    RemoveClient(client_id, reason, true);
+}
+
+void NetServer::RemoveClient(uint32 client_id, const String& reason, bool notify_remote) {
+    const auto it = clients_.find(client_id);
+    if (it == clients_.end()) return;
+    if (notify_remote) {
+        Array<uint8> packet;
+        WriteHeader(packet, kDisconnect);
+        // Sent directly (bypassing the conditioner) a few times; the client may never see it otherwise
+        for (int i = 0; i < 3; ++i) socket_.SendTo(it->second.address, packet.data(), packet.size());
+    }
+    PushEvent({NetEventType::Disconnected, client_id, Delivery::Reliable, {}, reason});
+    clients_.erase(it);
+}
+
+void NetServer::HandlePacket(const Address& from, const uint8* data, size_t size, float64 now) {
+    NetReader reader(data, size);
+    uint8 type;
+    if (!ReadHeader(reader, type)) return;
+
+    Client* client = FindByAddress(from);
+    switch (type) {
+        case kConnectRequest: {
+            uint64 nonce;
+            if (!reader.ReadU64(nonce)) return;
+            if (client && client->nonce != nonce) {
+                // Same address, new session: the old one is gone
+                RemoveClient(client->id, "reconnected", false);
+                client = nullptr;
+            }
+            Array<uint8> reply;
+            if (!client && clients_.size() >= max_clients_) {
+                WriteHeader(reply, kConnectDenied);
+                NetWriter(reply).WriteU64(nonce);
+                SendRaw(from, reply, now);
+                return;
+            }
+            if (!client) {
+                const uint32 id = next_client_id_++;
+                Client& added = clients_.emplace(id, Client{id, from, nonce, Connection()}).first->second;
+                added.connection.SetLastReceiveTime(now);
+                client = &added;
+                PushEvent({NetEventType::Connected, id, Delivery::Reliable, {}, from.ToString()});
+            }
+            client->connection.SetLastReceiveTime(now);
+            WriteHeader(reply, kConnectAccept);
+            NetWriter writer(reply);
+            writer.WriteU64(nonce);
+            writer.WriteU32(client->id);
+            SendRaw(from, reply, now);
+            break;
+        }
+        case kDisconnect:
+            if (client) RemoveClient(client->id, "client disconnected", false);
+            break;
+        case kPayload: {
+            if (!client) return;
+            Array<Message> messages;
+            if (!client->connection.ReadPacket(now, reader.GetCurrent(), reader.GetRemaining(), messages)) return;
+            for (Message& m : messages) {
+                PushEvent({NetEventType::Message, client->id, m.delivery, std::move(m.data), {}});
+            }
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+void NetServer::Update(float64 now) {
+    if (!socket_.IsOpen()) return;
+
+    uint8 buffer[Connection::kMaxPacketSize + 64];
+    Address from;
+    int32 size;
+    while ((size = socket_.ReceiveFrom(from, buffer, sizeof(buffer))) > 0) {
+        HandlePacket(from, buffer, static_cast<size_t>(size), now);
+    }
+
+    Array<uint32> timed_out;
+    for (auto& [id, client] : clients_) {
+        if (now - client.connection.GetLastReceiveTime() > config_.timeout_seconds) timed_out.push_back(id);
+    }
+    for (uint32 id : timed_out) RemoveClient(id, "timeout", true);
+
+    for (auto& [id, client] : clients_) {
+        Array<uint8> packet;
+        WriteHeader(packet, kPayload);
+        if (client.connection.WritePacket(now, packet)) SendRaw(client.address, packet, now);
+    }
+    FlushDelayed(now);
+}
+
+// ============================================================================
+// NetClient
+// ============================================================================
+
+NetClient::NetClient(const NetConfig& config) : NetEndpoint(config) {}
+
+NetClient::~NetClient() {
+    if (state_ != ClientState::Disconnected) Disconnect(0.0);
+}
+
+bool NetClient::Connect(const Address& server, float64 now) {
+    if (state_ != ClientState::Disconnected) Disconnect(now);
+    if (!server.IsValid() || !socket_.Open(0)) return false;
+
+    server_ = server;
+    state_ = ClientState::Connecting;
+    connection_ = Connection();
+    nonce_ = RandomNonce();
+    client_id_ = 0;
+    connect_start_ = now;
+    last_request_ = -1.0;
+    return true;
+}
+
+void NetClient::Disconnect(float64 /*now*/) {
+    if (state_ == ClientState::Disconnected) return;
+    if (state_ == ClientState::Connected) {
+        Array<uint8> packet;
+        WriteHeader(packet, kDisconnect);
+        for (int i = 0; i < 3; ++i) socket_.SendTo(server_, packet.data(), packet.size());
+        PushEvent({NetEventType::Disconnected, 0, Delivery::Reliable, {}, "disconnected"});
+    }
+    socket_.Close();
+    state_ = ClientState::Disconnected;
+}
+
+void NetClient::Fail(const String& reason) {
+    const bool was_connected = state_ == ClientState::Connected;
+    socket_.Close();
+    state_ = ClientState::Disconnected;
+    PushEvent({was_connected ? NetEventType::Disconnected : NetEventType::ConnectionFailed, 0, Delivery::Reliable, {},
+               reason});
+}
+
+bool NetClient::Send(Delivery delivery, const void* data, size_t size) {
+    return state_ == ClientState::Connected && connection_.QueueMessage(delivery, data, size);
+}
+
+void NetClient::HandlePacket(const uint8* data, size_t size, float64 now) {
+    NetReader reader(data, size);
+    uint8 type;
+    if (!ReadHeader(reader, type)) return;
+
+    switch (type) {
+        case kConnectAccept: {
+            uint64 nonce;
+            uint32 id;
+            if (!reader.ReadU64(nonce) || !reader.ReadU32(id) || nonce != nonce_) return;
+            if (state_ == ClientState::Connecting) {
+                state_ = ClientState::Connected;
+                client_id_ = id;
+                connection_.SetLastReceiveTime(now);
+                PushEvent({NetEventType::Connected, 0, Delivery::Reliable, {}, server_.ToString()});
+            }
+            break;
+        }
+        case kConnectDenied: {
+            uint64 nonce;
+            if (reader.ReadU64(nonce) && nonce == nonce_ && state_ == ClientState::Connecting) Fail("server full");
+            break;
+        }
+        case kDisconnect:
+            if (state_ == ClientState::Connected) Fail("disconnected by server");
+            break;
+        case kPayload: {
+            if (state_ != ClientState::Connected) return;
+            Array<Message> messages;
+            if (!connection_.ReadPacket(now, reader.GetCurrent(), reader.GetRemaining(), messages)) return;
+            for (Message& m : messages) PushEvent({NetEventType::Message, 0, m.delivery, std::move(m.data), {}});
+            break;
+        }
+        default:
+            break;
+    }
+}
+
+void NetClient::Update(float64 now) {
+    if (state_ == ClientState::Disconnected) return;
+
+    uint8 buffer[Connection::kMaxPacketSize + 64];
+    Address from;
+    int32 size;
+    while (socket_.IsOpen() && (size = socket_.ReceiveFrom(from, buffer, sizeof(buffer))) > 0) {
+        if (from == server_) HandlePacket(buffer, static_cast<size_t>(size), now);
+    }
+    if (state_ == ClientState::Disconnected) return;
+
+    if (state_ == ClientState::Connecting) {
+        if (now - connect_start_ > config_.connect_timeout_seconds) {
+            Fail("connection timed out");
+            return;
+        }
+        if (last_request_ < 0.0 || now - last_request_ >= config_.connect_retry_seconds) {
+            Array<uint8> request;
+            WriteHeader(request, kConnectRequest);
+            NetWriter(request).WriteU64(nonce_);
+            SendRaw(server_, request, now);
+            last_request_ = now;
+        }
+    } else {
+        if (now - connection_.GetLastReceiveTime() > config_.timeout_seconds) {
+            Fail("timeout");
+            return;
+        }
+        Array<uint8> packet;
+        WriteHeader(packet, kPayload);
+        if (connection_.WritePacket(now, packet)) SendRaw(server_, packet, now);
+    }
+    FlushDelayed(now);
 }
 
 } // namespace DRX::Network

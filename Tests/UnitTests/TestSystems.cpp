@@ -631,7 +631,7 @@ TEST(AudioDecodeTest, Wav8BitAndFloat) {
     String error;
     const Array<uint8> wav8 = MakeWav(1, 1, 8000, 8, {128, 255, 0});
     ASSERT_TRUE(Audio::DecodeAudio(wav8.data(), wav8.size(), Audio::AudioFormat::WAV, pcm, error)) << error;
-    EXPECT_EQ(pcm.samples, (Array<int16>{0, 127 << 8, -128 << 8}));
+    EXPECT_EQ(pcm.samples, (Array<int16>{0, 127 * 256, -128 * 256}));
 
     const float32 values[2] = {0.5f, -1.0f};
     Array<uint8> payload(sizeof(values));
