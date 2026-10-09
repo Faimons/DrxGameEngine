@@ -5,7 +5,9 @@
 #include "HAL/Public/GraphicsDevice.h"
 #include "Core/Public/Log.h"
 
+#ifndef GLFW_INCLUDE_VULKAN
 #define GLFW_INCLUDE_VULKAN
+#endif
 #include <GLFW/glfw3.h>
 
 #include <set>
@@ -33,11 +35,11 @@ namespace {
         DRX_UNUSED(user_data);
 
         if (severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) {
-            DRX_LOG_ERROR("Vulkan: %s", callback_data->pMessage);
+            DRX_LOG_ERROR("Vulkan: {}", callback_data->pMessage);
         } else if (severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) {
-            DRX_LOG_WARNING("Vulkan: %s", callback_data->pMessage);
+            DRX_LOG_WARNING("Vulkan: {}", callback_data->pMessage);
         } else if (severity >= VK_DEBUG_UTILS_MESSAGE_SEVERITY_INFO_BIT_EXT) {
-            DRX_LOG_DEBUG("Vulkan: %s", callback_data->pMessage);
+            DRX_LOG_DEBUG("Vulkan: {}", callback_data->pMessage);
         }
         return VK_FALSE;
     }
@@ -170,7 +172,7 @@ bool GraphicsDevice::CreateInstance() {
 
     VkResult result = vkCreateInstance(&create_info, nullptr, &instance_);
     if (result != VK_SUCCESS) {
-        DRX_LOG_ERROR("Failed to create Vulkan instance: %d", result);
+        DRX_LOG_ERROR("Failed to create Vulkan instance: {}", static_cast<int>(result));
         return false;
     }
 
@@ -202,7 +204,7 @@ bool GraphicsDevice::SetupDebugMessenger() {
 bool GraphicsDevice::CreateSurface() {
     VkResult result = glfwCreateWindowSurface(instance_, window_->GetNativeHandle(), nullptr, &surface_);
     if (result != VK_SUCCESS) {
-        DRX_LOG_ERROR("Failed to create window surface: %d", result);
+        DRX_LOG_ERROR("Failed to create window surface: {}", static_cast<int>(result));
         return false;
     }
     return true;
@@ -234,7 +236,7 @@ bool GraphicsDevice::PickPhysicalDevice() {
 
     VkPhysicalDeviceProperties properties;
     vkGetPhysicalDeviceProperties(physical_device_, &properties);
-    DRX_LOG_INFO("Selected GPU: %s", properties.deviceName);
+    DRX_LOG_INFO("Selected GPU: {}", properties.deviceName);
 
     queue_families_ = FindQueueFamilies(physical_device_);
 
@@ -479,7 +481,7 @@ bool GraphicsDevice::CreateSwapChain() {
     swap_chain_format_ = surface_format.format;
     swap_chain_extent_ = extent;
 
-    DRX_LOG_INFO("Swap chain created: %ux%u, %u images", extent.width, extent.height, image_count);
+    DRX_LOG_INFO("Swap chain created: {}x{}, {} images", extent.width, extent.height, image_count);
     return true;
 }
 
@@ -592,6 +594,7 @@ void GraphicsDevice::RecreateSwapChain() {
 
     CreateSwapChain();
     CreateImageViews();
+    ++swap_chain_generation_;
 }
 
 bool GraphicsDevice::BeginFrame() {

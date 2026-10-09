@@ -123,49 +123,7 @@ struct Transform {
     }
 
     void LookAt(const Vector3& target, const Vector3& up = Vector3::Up) {
-        Vector3 forward = (target - position).Normalized();
-        Vector3 right = Vector3::Cross(up, forward).Normalized();
-        Vector3 newUp = Vector3::Cross(forward, right);
-
-        Matrix4 mat(1.0f);
-        mat[0][0] = right.x;
-        mat[1][0] = right.y;
-        mat[2][0] = right.z;
-        mat[0][1] = newUp.x;
-        mat[1][1] = newUp.y;
-        mat[2][1] = newUp.z;
-        mat[0][2] = -forward.x;
-        mat[1][2] = -forward.y;
-        mat[2][2] = -forward.z;
-
-        // Extract quaternion from rotation matrix
-        float32 trace = mat[0][0] + mat[1][1] + mat[2][2];
-        if (trace > 0) {
-            float32 s = 0.5f / std::sqrt(trace + 1.0f);
-            rotation.w = 0.25f / s;
-            rotation.x = (mat[1][2] - mat[2][1]) * s;
-            rotation.y = (mat[2][0] - mat[0][2]) * s;
-            rotation.z = (mat[0][1] - mat[1][0]) * s;
-        } else if (mat[0][0] > mat[1][1] && mat[0][0] > mat[2][2]) {
-            float32 s = 2.0f * std::sqrt(1.0f + mat[0][0] - mat[1][1] - mat[2][2]);
-            rotation.w = (mat[1][2] - mat[2][1]) / s;
-            rotation.x = 0.25f * s;
-            rotation.y = (mat[1][0] + mat[0][1]) / s;
-            rotation.z = (mat[2][0] + mat[0][2]) / s;
-        } else if (mat[1][1] > mat[2][2]) {
-            float32 s = 2.0f * std::sqrt(1.0f + mat[1][1] - mat[0][0] - mat[2][2]);
-            rotation.w = (mat[2][0] - mat[0][2]) / s;
-            rotation.x = (mat[1][0] + mat[0][1]) / s;
-            rotation.y = 0.25f * s;
-            rotation.z = (mat[2][1] + mat[1][2]) / s;
-        } else {
-            float32 s = 2.0f * std::sqrt(1.0f + mat[2][2] - mat[0][0] - mat[1][1]);
-            rotation.w = (mat[0][1] - mat[1][0]) / s;
-            rotation.x = (mat[2][0] + mat[0][2]) / s;
-            rotation.y = (mat[2][1] + mat[1][2]) / s;
-            rotation.z = 0.25f * s;
-        }
-        rotation.Normalize();
+        rotation = Quaternion::LookRotation(target - position, up);
     }
 
     // Interpolation

@@ -237,8 +237,8 @@ void Weapon::ApplyRecoil() {
 
 Player::Player(const PlayerConfig& config)
     : config_(config),
-      health_(config.max_health),
-      current_height_(config.standing_height) {
+      current_height_(config.standing_height),
+      health_(config.max_health) {
     weapons_.resize(static_cast<size_t>(WeaponSlot::MaxSlots));
 
     health_.SetOnDeath([this](const DamageInfo& damage) {

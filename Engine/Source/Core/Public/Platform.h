@@ -49,7 +49,10 @@
 // API Export/Import
 // ============================================================================
 
-#ifdef DRX_PLATFORM_WINDOWS
+#if defined(DRX_STATIC)
+    #define DRX_API
+    #define DRX_API_LOCAL
+#elif defined(DRX_PLATFORM_WINDOWS)
     #ifdef DRX_BUILD_DLL
         #define DRX_API __declspec(dllexport)
     #else

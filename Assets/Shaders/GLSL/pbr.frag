@@ -124,8 +124,8 @@ float CalculateAttenuation(float distance, float range) {
     float attenuation = 1.0 / (distance * distance);
     // Smooth falloff at range boundary
     float factor = distance / range;
-    float smooth = clamp(1.0 - factor * factor * factor * factor, 0.0, 1.0);
-    return attenuation * smooth * smooth;
+    float falloff = clamp(1.0 - factor * factor * factor * factor, 0.0, 1.0);
+    return attenuation * falloff * falloff;
 }
 
 // Calculate spotlight intensity

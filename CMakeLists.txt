@@ -2,7 +2,7 @@ cmake_minimum_required(VERSION 3.20)
 
 project(DRXEngine
     VERSION 1.0.0
-    LANGUAGES CXX
+    LANGUAGES C CXX
     DESCRIPTION "Autonomous AI-Powered Game Engine"
 )
 
@@ -22,16 +22,22 @@ option(DRX_BUILD_TESTS "Build test suite" ON)
 option(DRX_ENABLE_VALIDATION "Enable Vulkan validation layers" ON)
 option(DRX_BUILD_EXAMPLES "Build example projects" ON)
 
-# Compiler flags
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wpedantic")
-    set(CMAKE_CXX_FLAGS_DEBUG "-g -O0 -DDRX_DEBUG=1")
-    set(CMAKE_CXX_FLAGS_RELEASE "-O3 -DNDEBUG")
-elseif(MSVC)
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /W4")
-    set(CMAKE_CXX_FLAGS_DEBUG "/Od /Zi /DDRX_DEBUG=1")
-    set(CMAKE_CXX_FLAGS_RELEASE "/O2 /DNDEBUG")
+# Warnings are applied per target so third-party code keeps its own settings
+function(drx_set_warnings target)
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
+    elseif(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /permissive-)
+    endif()
+    target_compile_definitions(${target} PRIVATE $<$<CONFIG:Debug>:DRX_DEBUG=1>)
+endfunction()
+
+if(MSVC)
+    add_compile_options(/MP /utf-8)
 endif()
+
+set(THREADS_PREFER_PTHREAD_FLAG ON)
+find_package(Threads REQUIRED)
 
 # Output directories
 set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
@@ -53,29 +59,14 @@ else()
     message(STATUS "OpenGL not found")
 endif()
 find_package(glfw3 3.3 QUIET)
-find_package(glm QUIET)
-
-# If packages not found via find_package, use bundled versions
 if(NOT glfw3_FOUND)
     message(STATUS "GLFW not found, using bundled version")
     set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
     set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
     set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+    set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
     set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "" FORCE)
-    set(GLFW_BUILD_X11 ON CACHE BOOL "" FORCE)
-    if(EXISTS ${CMAKE_SOURCE_DIR}/ThirdParty/glfw/CMakeLists.txt)
-        add_subdirectory(ThirdParty/glfw)
-    endif()
-endif()
-
-if(NOT glm_FOUND)
-    message(STATUS "GLM not found, using bundled version")
-    if(EXISTS ${CMAKE_SOURCE_DIR}/ThirdParty/glm/CMakeLists.txt)
-        add_subdirectory(ThirdParty/glm)
-    else()
-        # GLM is header-only, just add include path
-        set(GLM_INCLUDE_DIR ${CMAKE_SOURCE_DIR}/ThirdParty/glm)
-    endif()
+    add_subdirectory(ThirdParty/glfw)
 endif()
 
 # Third party libraries
@@ -83,11 +74,15 @@ add_subdirectory(ThirdParty)
 
 # Engine library (requires Vulkan)
 if(Vulkan_FOUND)
+    list(APPEND CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake)
+    include(DRXShaders)
     add_subdirectory(Engine)
 
     # Editor (requires Engine)
-    if(DRX_BUILD_EDITOR)
+    if(DRX_BUILD_EDITOR AND TARGET imgui)
         add_subdirectory(Editor)
+    elseif(DRX_BUILD_EDITOR)
+        message(STATUS "Skipping Editor (ImGui requires OpenGL and GLFW)")
     endif()
 
     # Tests (requires Engine)

@@ -36,6 +36,7 @@ Logger::Logger() {
 }
 
 Logger::~Logger() {
+    std::lock_guard<std::mutex> lock(mutex_);
     if (file_) {
         fclose(file_);
     }
@@ -58,9 +59,7 @@ void Logger::SetOutputFile(const String& path) {
     }
 
     file_ = fopen(path.c_str(), "w");
-    if (file_) {
-        file_output_ = true;
-    }
+    file_output_ = (file_ != nullptr);
 }
 
 void Logger::EnableConsoleOutput(bool enable) {
@@ -75,33 +74,28 @@ void Logger::EnableColors(bool enable) {
     colors_enabled_ = enable;
 }
 
-void Logger::Log(LogLevel level, const char* file, int line, const char* fmt, ...) {
-    va_list args;
-    va_start(args, fmt);
-    LogV(level, file, line, fmt, args);
-    va_end(args);
-}
-
-void Logger::LogV(LogLevel level, const char* file, int line, const char* fmt, va_list args) {
-    if (level < level_) {
+void Logger::Write(LogLevel level, const char* file, int line, std::string_view message) {
+    if (!IsEnabled(level)) {
         return;
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
 
     // Get timestamp
-    auto now = std::chrono::system_clock::now();
-    auto time = std::chrono::system_clock::to_time_t(now);
-    auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+    const auto now = std::chrono::system_clock::now();
+    const std::time_t time = std::chrono::system_clock::to_time_t(now);
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
         now.time_since_epoch()
     ).count() % 1000;
 
+    std::tm local_time{};
+#ifdef DRX_PLATFORM_WINDOWS
+    localtime_s(&local_time, &time);
+#else
+    localtime_r(&time, &local_time);
+#endif
     char timestamp[32];
-    std::strftime(timestamp, sizeof(timestamp), "%H:%M:%S", std::localtime(&time));
-
-    // Format message
-    char message[4096];
-    vsnprintf(message, sizeof(message), fmt, args);
+    std::strftime(timestamp, sizeof(timestamp), "%H:%M:%S", &local_time);
 
     // Extract filename from path
     const char* filename = file;
@@ -114,44 +108,52 @@ void Logger::LogV(LogLevel level, const char* file, int line, const char* fmt, v
     // Console output
     if (console_output_) {
         if (colors_enabled_) {
-            fprintf(stderr, "%s[%s.%03lld] [%s] %s:%d: %s%s\n",
+            fprintf(stderr, "%s[%s.%03lld] [%s] %s:%d: %.*s%s\n",
                     GetLevelColor(level),
                     timestamp,
                     static_cast<long long>(ms),
                     GetLevelString(level),
                     filename,
                     line,
-                    message,
+                    static_cast<int>(message.size()),
+                    message.data(),
                     "\033[0m");
         } else {
-            fprintf(stderr, "[%s.%03lld] [%s] %s:%d: %s\n",
+            fprintf(stderr, "[%s.%03lld] [%s] %s:%d: %.*s\n",
                     timestamp,
                     static_cast<long long>(ms),
                     GetLevelString(level),
                     filename,
                     line,
-                    message);
+                    static_cast<int>(message.size()),
+                    message.data());
         }
     }
 
     // File output
     if (file_output_ && file_) {
-        fprintf(file_, "[%s.%03lld] [%s] %s:%d: %s\n",
+        fprintf(file_, "[%s.%03lld] [%s] %s:%d: %.*s\n",
                 timestamp,
                 static_cast<long long>(ms),
                 GetLevelString(level),
                 filename,
                 line,
-                message);
+                static_cast<int>(message.size()),
+                message.data());
     }
 
     // Flush for errors and fatal
     if (level >= LogLevel::Error) {
-        Flush();
+        FlushUnlocked();
     }
 }
 
 void Logger::Flush() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    FlushUnlocked();
+}
+
+void Logger::FlushUnlocked() {
     if (console_output_) {
         fflush(stderr);
     }

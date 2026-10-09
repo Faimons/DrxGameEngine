@@ -3,6 +3,7 @@
  */
 
 #include <gtest/gtest.h>
+#include <cmath>
 #include "Core/Public/Math/Vector2.h"
 #include "Core/Public/Math/Vector3.h"
 #include "Core/Public/Math/Vector4.h"
@@ -142,8 +143,8 @@ TEST(QuaternionTest, AxisAngle) {
     Quaternion q = Quaternion::FromAxisAngle(Vector3::Up, 3.14159f / 2.0f);
     Vector3 forward = q * Vector3::Forward;
 
-    // Forward should become approximately Right after 90 degree rotation around Y
-    EXPECT_NEAR(forward.x, 1.0f, 0.001f);
+    // Right-handed: +90 degrees around +Y turns Forward (-Z) into Left (-X)
+    EXPECT_NEAR(forward.x, -1.0f, 0.001f);
     EXPECT_NEAR(forward.y, 0.0f, 0.001f);
     EXPECT_NEAR(forward.z, 0.0f, 0.001f);
 }
@@ -179,4 +180,102 @@ TEST(TransformTest, TransformPoint) {
     EXPECT_FLOAT_EQ(result.x, 1.0f);
     EXPECT_FLOAT_EQ(result.y, 2.0f);
     EXPECT_FLOAT_EQ(result.z, 3.0f);
+}
+
+// ============================================================================
+// Rotation conventions & matrix inverse
+// ============================================================================
+
+namespace {
+
+void ExpectSameRotation(const Quaternion& a, const Quaternion& b, float tolerance = 1e-4f) {
+    EXPECT_NEAR(std::abs(Quaternion::Dot(a.Normalized(), b.Normalized())), 1.0f, tolerance);
+}
+
+void ExpectVectorNear(const Vector3& a, const Vector3& b, float tolerance = 1e-4f) {
+    EXPECT_NEAR(a.x, b.x, tolerance);
+    EXPECT_NEAR(a.y, b.y, tolerance);
+    EXPECT_NEAR(a.z, b.z, tolerance);
+}
+
+} // namespace
+
+TEST(QuaternionTest, EulerRoundTrip) {
+    for (float pitch = -1.4f; pitch <= 1.4f; pitch += 0.35f) {
+        for (float yaw = -3.0f; yaw <= 3.0f; yaw += 0.75f) {
+            for (float roll = -3.0f; roll <= 3.0f; roll += 1.0f) {
+                const Quaternion q = Quaternion::FromEuler(pitch, yaw, roll);
+                ExpectSameRotation(q, Quaternion::FromEuler(q.ToEuler()));
+            }
+        }
+    }
+}
+
+TEST(QuaternionTest, EulerOrderIsYawPitchRoll) {
+    const float pitch = 0.4f, yaw = 1.1f, roll = -0.3f;
+    const Quaternion expected = Quaternion::FromAxisAngle(Vector3::Up, yaw) *
+                                Quaternion::FromAxisAngle(Vector3::Right, pitch) *
+                                Quaternion::FromAxisAngle(Vector3(0, 0, 1), roll);
+    ExpectSameRotation(Quaternion::FromEuler(pitch, yaw, roll), expected);
+}
+
+TEST(QuaternionTest, RotationMatrixRoundTrip) {
+    const Quaternion q = Quaternion::FromEuler(0.7f, -2.1f, 0.4f);
+    ExpectSameRotation(Quaternion::FromRotationMatrix(q.ToMatrix()), q);
+}
+
+TEST(QuaternionTest, LookRotationPointsForward) {
+    const Vector3 dir = Vector3(1.0f, 2.0f, -3.0f).Normalized();
+    const Quaternion q = Quaternion::LookRotation(dir);
+
+    ExpectVectorNear(q.GetForward(), dir);
+    EXPECT_NEAR(q.GetRight().y, 0.0f, 1e-4f);  // no roll
+}
+
+TEST(QuaternionTest, LookRotationStraightUpIsStable) {
+    const Quaternion q = Quaternion::LookRotation(Vector3::Up);
+    ExpectVectorNear(q.GetForward(), Vector3::Up);
+    EXPECT_NEAR(q.Length(), 1.0f, 1e-4f);
+}
+
+TEST(QuaternionTest, FromToRotation) {
+    ExpectVectorNear(Quaternion::FromToRotation(Vector3::Right, Vector3::Up) * Vector3::Right, Vector3::Up);
+    ExpectVectorNear(Quaternion::FromToRotation(Vector3::Right, Vector3::Left) * Vector3::Right, Vector3::Left);
+    ExpectSameRotation(Quaternion::FromToRotation(Vector3::Up, Vector3::Up), Quaternion::Identity());
+}
+
+TEST(Matrix4Test, InverseOfTRS) {
+    const Matrix4 m = Matrix4::Translation(3.0f, -4.0f, 5.0f) *
+                      Quaternion::FromEuler(0.3f, 1.0f, 0.2f).ToMatrix() *
+                      Matrix4::Scale(Vector3(2.0f, 3.0f, 4.0f));
+    const Matrix4 identity = m * m.Inverse();
+
+    for (int col = 0; col < 4; ++col) {
+        for (int row = 0; row < 4; ++row) {
+            EXPECT_NEAR(identity[col][row], col == row ? 1.0f : 0.0f, 1e-4f);
+        }
+    }
+}
+
+TEST(Matrix4Test, SingularInverseReturnsIdentity) {
+    const Matrix4 inv = Matrix4().Inverse();
+    EXPECT_FLOAT_EQ(inv[0][0], 1.0f);
+    EXPECT_FLOAT_EQ(inv[3][3], 1.0f);
+    EXPECT_FLOAT_EQ(inv[1][0], 0.0f);
+}
+
+TEST(Matrix4Test, DeterminantOfScale) {
+    EXPECT_NEAR(Matrix4::Scale(Vector3(2.0f, 3.0f, 4.0f)).Determinant(), 24.0f, 1e-4f);
+}
+
+TEST(TransformTest, LookAtFacesTarget) {
+    Transform t(Vector3(1.0f, 1.0f, 1.0f));
+    t.LookAt(Vector3(5.0f, 1.0f, 1.0f));
+    ExpectVectorNear(t.GetForward(), Vector3::Right);
+}
+
+TEST(TransformTest, InverseUndoesTransform) {
+    const Transform t(Vector3(1.0f, -2.0f, 3.0f), Quaternion::FromEuler(0.2f, 0.9f, -0.4f), Vector3(2.0f, 2.0f, 2.0f));
+    const Vector3 p(4.0f, 5.0f, -6.0f);
+    ExpectVectorNear(t.InverseTransformPoint(t.TransformPoint(p)), p);
 }

@@ -19,12 +19,14 @@ enable_testing()
 add_executable(DRXTests
     UnitTests/TestMath.cpp
     UnitTests/TestCore.cpp
+    UnitTests/TestSystems.cpp
 )
 
 target_link_libraries(DRXTests PRIVATE
     DRXEngine
     GTest::gtest_main
 )
+drx_set_warnings(DRXTests)
 
 target_include_directories(DRXTests PRIVATE
     ${CMAKE_SOURCE_DIR}/Engine/Source

@@ -7,6 +7,7 @@
 
 #include <fstream>
 #include <chrono>
+#include <cstring>
 
 namespace DRX::Resource {
 

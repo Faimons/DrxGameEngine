@@ -11,6 +11,10 @@
 #include <functional>
 #include <unordered_map>
 
+#include "Core/Public/Math/Vector2.h"
+#include "Core/Public/Math/Vector4.h"
+#include "Core/Public/Math/Transform.h"
+
 // Forward declarations
 struct GLFWwindow;
 
@@ -29,30 +33,14 @@ using int32 = int;
 using float32 = float;
 
 // ============================================================================
-// Math Types (simplified for editor)
+// Math Types (shared with the engine)
 // ============================================================================
 namespace Math {
-    struct Vector2 { float x = 0, y = 0; };
-    struct Vector3 {
-        float x = 0, y = 0, z = 0;
-        static Vector3 Zero() { return {0, 0, 0}; }
-        static Vector3 One() { return {1, 1, 1}; }
-        Vector3 operator+(const Vector3& v) const { return {x+v.x, y+v.y, z+v.z}; }
-        Vector3 operator-(const Vector3& v) const { return {x-v.x, y-v.y, z-v.z}; }
-        Vector3 operator*(float f) const { return {x*f, y*f, z*f}; }
-    };
-    struct Vector4 { float x = 0, y = 0, z = 0, w = 1; };
-    struct Quaternion {
-        float x = 0, y = 0, z = 0, w = 1;
-        static Quaternion Identity() { return {0, 0, 0, 1}; }
-        Vector3 ToEuler() const { return {0, 0, 0}; } // Simplified
-        static Quaternion FromEuler(const Vector3& euler) { return Identity(); }
-    };
-    struct Transform {
-        Vector3 position;
-        Quaternion rotation;
-        Vector3 scale = Vector3::One();
-    };
+    using Vector2 = DRX::Math::Vector2;
+    using Vector3 = DRX::Math::Vector3;
+    using Vector4 = DRX::Math::Vector4;
+    using Quaternion = DRX::Math::Quaternion;
+    using Transform = DRX::Math::Transform;
 }
 
 // ============================================================================
@@ -218,6 +206,7 @@ private:
     bool show_console_ = true;
     bool show_viewport_ = true;
     bool show_demo_window_ = false;
+    bool dock_layout_checked_ = false;
 
     // Viewport
     float camera_pos_[3] = {0, 5, -10};

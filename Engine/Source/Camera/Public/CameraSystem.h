@@ -6,6 +6,7 @@
 #pragma once
 
 #include "Core/Public/CoreTypes.h"
+#include "Core/Public/Math/Vector2.h"
 #include "Core/Public/Math/Vector3.h"
 #include "Core/Public/Math/Matrix4.h"
 #include "Core/Public/Math/Quaternion.h"
@@ -161,6 +162,7 @@ public:
 
     // Input
     void SetMoveInput(const Math::Vector2& input) { move_input_ = input; }
+    // Look delta: x positive turns right, y positive looks up
     void SetLookInput(const Math::Vector2& input) { look_input_ = input; }
     void SetJumpInput(bool jump) { jump_input_ = jump; }
     void SetSprintInput(bool sprint) { sprint_input_ = sprint; }

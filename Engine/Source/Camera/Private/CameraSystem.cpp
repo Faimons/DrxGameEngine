@@ -8,6 +8,24 @@
 
 namespace DRX::Camera {
 
+namespace {
+
+constexpr float32 kDegToRad = 3.14159265358979323846f / 180.0f;
+constexpr float32 kRadToDeg = 180.0f / 3.14159265358979323846f;
+
+// Frame-rate independent smoothing factor in [0, 1]
+float32 SmoothFactor(float32 rate, float32 delta_time) {
+    return 1.0f - std::exp(-rate * delta_time);
+}
+
+Math::Quaternion YawPitchRotation(float32 yaw_degrees, float32 pitch_degrees) {
+    const Math::Quaternion yaw_rot = Math::Quaternion::FromAxisAngle(Math::Vector3::Up, yaw_degrees * kDegToRad);
+    const Math::Quaternion pitch_rot = Math::Quaternion::FromAxisAngle(Math::Vector3::Right, pitch_degrees * kDegToRad);
+    return (yaw_rot * pitch_rot).Normalized();
+}
+
+} // namespace
+
 // ============================================================================
 // Camera
 // ============================================================================
@@ -27,32 +45,12 @@ void Camera::UpdateMatrices() {
 }
 
 void Camera::UpdateViewMatrix() {
-    Math::Vector3 forward = GetForward();
-    Math::Vector3 right = GetRight();
-    Math::Vector3 up = GetUp();
-
-    view_matrix_ = Math::Matrix4(
-        right.x, up.x, -forward.x, 0,
-        right.y, up.y, -forward.y, 0,
-        right.z, up.z, -forward.z, 0,
-        -Math::Vector3::Dot(right, position_),
-        -Math::Vector3::Dot(up, position_),
-        Math::Vector3::Dot(forward, position_),
-        1
-    );
+    view_matrix_ = Math::Matrix4::LookAt(position_, position_ + GetForward(), GetUp());
 }
 
 void Camera::UpdateProjectionMatrix() {
     if (projection_type_ == ProjectionType::Perspective) {
-        float32 rad = fov_ * 3.14159265359f / 180.0f;
-        float32 tanHalfFov = tan(rad / 2.0f);
-
-        projection_matrix_ = Math::Matrix4::Zero();
-        projection_matrix_.m[0][0] = 1.0f / (aspect_ratio_ * tanHalfFov);
-        projection_matrix_.m[1][1] = 1.0f / tanHalfFov;
-        projection_matrix_.m[2][2] = -(far_plane_ + near_plane_) / (far_plane_ - near_plane_);
-        projection_matrix_.m[2][3] = -1.0f;
-        projection_matrix_.m[3][2] = -(2.0f * far_plane_ * near_plane_) / (far_plane_ - near_plane_);
+        projection_matrix_ = Math::Matrix4::Perspective(fov_ * kDegToRad, aspect_ratio_, near_plane_, far_plane_);
     } else {
         float32 right = ortho_size_ * aspect_ratio_;
         float32 left = -right;
@@ -92,16 +90,7 @@ Math::Vector3 Camera::GetUp() const {
 }
 
 void Camera::LookAt(const Math::Vector3& target, const Math::Vector3& up) {
-    Math::Vector3 forward = (target - position_).Normalized();
-    Math::Vector3 right = Math::Vector3::Cross(up, forward).Normalized();
-    Math::Vector3 actualUp = Math::Vector3::Cross(forward, right);
-
-    rotation_ = Math::Quaternion::FromRotationMatrix(Math::Matrix4(
-        right.x, actualUp.x, forward.x, 0,
-        right.y, actualUp.y, forward.y, 0,
-        right.z, actualUp.z, forward.z, 0,
-        0, 0, 0, 1
-    ));
+    rotation_ = Math::Quaternion::LookRotation(target - position_, up);
     matrices_dirty_ = true;
 }
 
@@ -197,11 +186,11 @@ Camera::Ray Camera::ScreenPointToRay(const Math::Vector2& screen_pos) const {
 // ============================================================================
 
 FPSCameraController::FPSCameraController(Camera* camera)
-    : camera_(camera), current_distance_(distance) {
+    : camera_(camera) {
     if (camera_) {
-        Math::Vector3 euler = camera_->GetRotation().ToEuler();
-        yaw_ = euler.y;
-        pitch_ = euler.x;
+        const Math::Vector3 euler = camera_->GetRotation().ToEuler();
+        yaw_ = euler.y * kRadToDeg;
+        pitch_ = euler.x * kRadToDeg;
     }
 }
 
@@ -209,17 +198,12 @@ void FPSCameraController::Update(float32 delta_time) {
     if (!camera_) return;
 
     // Update rotation from look input
-    yaw_ += look_input_.x * look_sensitivity * (invert_y ? 1.0f : -1.0f);
+    yaw_ -= look_input_.x * look_sensitivity;
     pitch_ += look_input_.y * look_sensitivity * (invert_y ? -1.0f : 1.0f);
     pitch_ = std::clamp(pitch_, min_pitch, max_pitch);
+    yaw_ = std::fmod(yaw_, 360.0f);
 
-    // Calculate rotation quaternion
-    float32 rad = 3.14159265359f / 180.0f;
-    Math::Quaternion yaw_rot = Math::Quaternion::FromAxisAngle(Math::Vector3::Up, yaw_ * rad);
-    Math::Quaternion pitch_rot = Math::Quaternion::FromAxisAngle(Math::Vector3::Right, pitch_ * rad);
-    Math::Quaternion rotation = yaw_rot * pitch_rot;
-
-    camera_->SetRotation(rotation);
+    camera_->SetRotation(YawPitchRotation(yaw_, pitch_));
 
     // Calculate movement
     float32 current_speed = move_speed;
@@ -238,7 +222,7 @@ void FPSCameraController::Update(float32 delta_time) {
     Math::Vector3 target_velocity = (forward * move_input_.y + right * move_input_.x) * current_speed;
 
     // Smooth velocity
-    velocity_ = Math::Vector3::Lerp(velocity_, target_velocity, smoothing * delta_time);
+    velocity_ = Math::Vector3::Lerp(velocity_, target_velocity, SmoothFactor(smoothing, delta_time));
 
     Math::Vector3 pos = camera_->GetPosition();
     pos = pos + velocity_ * delta_time;
@@ -268,7 +252,7 @@ void OrbitCameraController::Update(float32 delta_time) {
     distance = std::clamp(distance, min_distance, max_distance);
 
     // Smooth distance
-    current_distance_ = current_distance_ + (distance - current_distance_) * smoothing * delta_time;
+    current_distance_ += (distance - current_distance_) * SmoothFactor(smoothing, delta_time);
 
     // Pan the target
     if (pan_input_.LengthSquared() > 0.001f) {
@@ -278,11 +262,10 @@ void OrbitCameraController::Update(float32 delta_time) {
     }
 
     // Calculate camera position
-    float32 rad = 3.14159265359f / 180.0f;
-    float32 cos_pitch = cos(pitch_ * rad);
-    float32 sin_pitch = sin(pitch_ * rad);
-    float32 cos_yaw = cos(yaw_ * rad);
-    float32 sin_yaw = sin(yaw_ * rad);
+    const float32 cos_pitch = std::cos(pitch_ * kDegToRad);
+    const float32 sin_pitch = std::sin(pitch_ * kDegToRad);
+    const float32 cos_yaw = std::cos(yaw_ * kDegToRad);
+    const float32 sin_yaw = std::sin(yaw_ * kDegToRad);
 
     Math::Vector3 offset(
         current_distance_ * cos_pitch * sin_yaw,
@@ -323,17 +306,15 @@ void FollowCameraController::Update(float32 delta_time) {
     distance_ = std::clamp(distance_, min_distance, max_distance);
 
     // Calculate desired position
-    float32 rad = 3.14159265359f / 180.0f;
-    Math::Quaternion yaw_rot = Math::Quaternion::FromAxisAngle(Math::Vector3::Up, yaw_ * rad);
-    Math::Quaternion pitch_rot = Math::Quaternion::FromAxisAngle(Math::Vector3::Right, pitch_ * rad);
-    Math::Quaternion rotation = yaw_rot * pitch_rot;
+    const Math::Quaternion rotation = YawPitchRotation(yaw_, pitch_);
 
-    Math::Vector3 target_pos = target_transform_.position;
-    Math::Vector3 offset_rotated = rotation.Rotate(Math::Vector3(0, offset.y, -distance_));
-    Math::Vector3 desired_pos = target_pos + offset_rotated;
+    // Camera sits behind the target (+Z is behind for a -Z forward convention)
+    const Math::Vector3 target_pos = target_transform_.position;
+    const Math::Vector3 offset_rotated = rotation.Rotate(Math::Vector3(0, offset.y, distance_));
+    const Math::Vector3 desired_pos = target_pos + offset_rotated;
 
     // Smooth position
-    current_position_ = Math::Vector3::Lerp(current_position_, desired_pos, smoothing * delta_time);
+    current_position_ = Math::Vector3::Lerp(current_position_, desired_pos, SmoothFactor(smoothing, delta_time));
 
     // Avoid obstacles if enabled
     if (avoid_obstacles) {
@@ -361,9 +342,9 @@ void FollowCameraController::AvoidObstacles() {
 FreeLookCameraController::FreeLookCameraController(Camera* camera)
     : camera_(camera) {
     if (camera_) {
-        Math::Vector3 euler = camera_->GetRotation().ToEuler();
-        yaw_ = euler.y;
-        pitch_ = euler.x;
+        const Math::Vector3 euler = camera_->GetRotation().ToEuler();
+        yaw_ = euler.y * kRadToDeg;
+        pitch_ = euler.x * kRadToDeg;
     }
 }
 
@@ -371,14 +352,11 @@ void FreeLookCameraController::Update(float32 delta_time) {
     if (!camera_) return;
 
     // Update rotation
-    yaw_ += look_input_.x * look_sensitivity;
+    yaw_ -= look_input_.x * look_sensitivity;
     pitch_ += look_input_.y * look_sensitivity;
     pitch_ = std::clamp(pitch_, -89.0f, 89.0f);
 
-    float32 rad = 3.14159265359f / 180.0f;
-    Math::Quaternion yaw_rot = Math::Quaternion::FromAxisAngle(Math::Vector3::Up, yaw_ * rad);
-    Math::Quaternion pitch_rot = Math::Quaternion::FromAxisAngle(Math::Vector3::Right, pitch_ * rad);
-    camera_->SetRotation(yaw_rot * pitch_rot);
+    camera_->SetRotation(YawPitchRotation(yaw_, pitch_));
 
     // Calculate speed
     float32 current_speed = base_speed * speed_modifier_;
@@ -398,9 +376,9 @@ void FreeLookCameraController::Update(float32 delta_time) {
 
     // Accelerate/decelerate
     if (target_velocity.LengthSquared() > 0.001f) {
-        velocity_ = Math::Vector3::Lerp(velocity_, target_velocity, acceleration * delta_time);
+        velocity_ = Math::Vector3::Lerp(velocity_, target_velocity, SmoothFactor(acceleration, delta_time));
     } else {
-        velocity_ = Math::Vector3::Lerp(velocity_, Math::Vector3::Zero, deceleration * delta_time);
+        velocity_ = Math::Vector3::Lerp(velocity_, Math::Vector3::Zero, SmoothFactor(deceleration, delta_time));
     }
 
     Math::Vector3 pos = camera_->GetPosition();
@@ -416,9 +394,9 @@ void FreeLookCameraController::SetFocusPoint(const Math::Vector3& point) {
 
     camera_->LookAt(point);
 
-    Math::Vector3 euler = camera_->GetRotation().ToEuler();
-    yaw_ = euler.y;
-    pitch_ = euler.x;
+    const Math::Vector3 euler = camera_->GetRotation().ToEuler();
+    yaw_ = euler.y * kRadToDeg;
+    pitch_ = euler.x * kRadToDeg;
 }
 
 // ============================================================================

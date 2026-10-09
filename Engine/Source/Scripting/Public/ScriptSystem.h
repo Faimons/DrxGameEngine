@@ -183,19 +183,9 @@ public:
     void RegisterFunction(const String& name, ScriptFunction func);
     void RegisterFunction(const String& table, const String& name, ScriptFunction func);
 
-    // Class binding
+    // Class binding: creates a metatable `name` whose userdata holds an owning T*
     template<typename T>
     void RegisterClass(const String& name);
-
-    template<typename T, typename... Args>
-    void RegisterConstructor();
-
-    template<typename T, typename R, typename... Args>
-    void RegisterMethod(const String& class_name, const String& method_name, R(T::*method)(Args...));
-
-    template<typename T, typename V>
-    void RegisterProperty(const String& class_name, const String& prop_name,
-                          V T::*member, bool readonly = false);
 
     // Error handling
     String GetLastError() const { return last_error_; }
@@ -219,6 +209,10 @@ private:
     void RegisterEntityAPI();
     void RegisterPhysicsAPI();
     void RegisterAudioAPI();
+
+    using NativeCallback = int (*)(lua_State*);
+    void RegisterClassMetatable(const String& name, NativeCallback gc);
+    static void* GetUserdata(lua_State* L, int index);
 
     static int LuaErrorHandler(lua_State* L);
     static int LuaPrint(lua_State* L);
@@ -269,27 +263,15 @@ private:
     void* entity_ = nullptr;
 };
 
-// Template implementations would go in a .inl file
-// Here's a simplified version:
-
 template<typename T>
 void ScriptEngine::RegisterClass(const String& name) {
-    // Create metatable for the class
-    luaL_newmetatable(L_, name.c_str());
-
-    // Set __index to itself
-    lua_pushvalue(L_, -1);
-    lua_setfield(L_, -2, "__index");
-
-    // Register __gc for destructor
-    lua_pushcfunction(L_, [](lua_State* L) -> int {
-        T* obj = *static_cast<T**>(lua_touserdata(L, 1));
-        delete obj;
+    RegisterClassMetatable(name, [](lua_State* L) -> int {
+        if (auto** slot = static_cast<T**>(GetUserdata(L, 1))) {
+            delete *slot;
+            *slot = nullptr;
+        }
         return 0;
     });
-    lua_setfield(L_, -2, "__gc");
-
-    lua_pop(L_, 1);
 }
 
 } // namespace DRX::Scripting

@@ -87,6 +87,11 @@ public:
     const Array<VkImageView>& GetSwapChainImageViews() const { return swap_chain_image_views_; }
 
     uint32 GetCurrentFrameIndex() const { return current_frame_; }
+    uint32 GetMaxFramesInFlight() const { return max_frames_in_flight_; }
+    // Incremented every time the swap chain (and its image views) is recreated
+    uint64 GetSwapChainGeneration() const { return swap_chain_generation_; }
+    // Requests a swap chain rebuild at the next present (window resize)
+    void NotifyResized() { framebuffer_resized_ = true; }
     uint32 GetCurrentImageIndex() const { return current_image_index_; }
     VkCommandBuffer GetCurrentCommandBuffer() const { return command_buffers_[current_frame_]; }
 
@@ -156,6 +161,7 @@ private:
     uint32 current_frame_ = 0;
     uint32 current_image_index_ = 0;
     uint32 max_frames_in_flight_ = 2;
+    uint64 swap_chain_generation_ = 0;
     bool framebuffer_resized_ = false;
 
     // Configuration

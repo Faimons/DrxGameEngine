@@ -106,6 +106,10 @@ if ! check_command "vulkaninfo"; then
     MISSING_TOOLS+=("vulkan")
 fi
 
+if ! check_command "glslangValidator"; then
+    MISSING_TOOLS+=("glslang")
+fi
+
 echo ""
 echo -e "${BLUE}[Python]${NC}"
 
@@ -166,15 +170,17 @@ else
                     pkg-config \
                     libvulkan-dev \
                     vulkan-tools \
-                    vulkan-validationlayers-dev \
+                    vulkan-validationlayers \
+                    glslang-tools \
                     spirv-tools \
-                    libglfw3-dev \
-                    libassimp-dev \
-                    libbullet-dev \
                     libopenal-dev \
-                    liblua5.4-dev \
-                    libfreetype-dev \
-                    rapidjson-dev \
+                    libx11-dev \
+                    libxrandr-dev \
+                    libxinerama-dev \
+                    libxcursor-dev \
+                    libxi-dev \
+                    libgl1-mesa-dev \
+                    libglu1-mesa-dev \
                     python3 \
                     python3-pip \
                     python3-venv
@@ -187,13 +193,16 @@ else
                     ninja \
                     vulkan-devel \
                     vulkan-tools \
-                    glfw-x11 \
-                    assimp \
-                    bullet \
+                    vulkan-validation-layers \
+                    glslang \
                     openal \
-                    lua \
-                    freetype2 \
-                    rapidjson \
+                    libx11 \
+                    libxrandr \
+                    libxinerama \
+                    libxcursor \
+                    libxi \
+                    mesa \
+                    glu \
                     python \
                     python-pip
                 ;;
@@ -205,13 +214,8 @@ else
                     vulkan-headers \
                     vulkan-loader \
                     molten-vk \
-                    glfw \
-                    assimp \
-                    bullet \
+                    glslang \
                     openal-soft \
-                    lua \
-                    freetype \
-                    rapidjson \
                     python@3.11
                 ;;
             *)

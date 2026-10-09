@@ -23,14 +23,14 @@ void HandleAssertionFailure(
     }
 
     if (message) {
-        DRX_LOG_FATAL("Assertion failed: %s", expression);
-        DRX_LOG_FATAL("Message: %s", message);
+        DRX_LOG_FATAL("Assertion failed: {}", expression);
+        DRX_LOG_FATAL("Message: {}", message);
     } else {
-        DRX_LOG_FATAL("Assertion failed: %s", expression);
+        DRX_LOG_FATAL("Assertion failed: {}", expression);
     }
 
-    DRX_LOG_FATAL("Location: %s:%d", filename, line);
-    DRX_LOG_FATAL("Function: %s", function);
+    DRX_LOG_FATAL("Location: {}:{}", filename, line);
+    DRX_LOG_FATAL("Function: {}", function);
 
     // Also print to stderr in case logging is disabled
     fprintf(stderr, "\n=== ASSERTION FAILED ===\n");

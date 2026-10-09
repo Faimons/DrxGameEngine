@@ -125,11 +125,12 @@ public:
 
     // Monadic operations
     template<typename F>
-    auto Map(F&& f) -> Result<decltype(f(value_)), E> {
+    auto Map(F&& f) const -> Result<std::invoke_result_t<F&, const T&>, E> {
+        using U = std::invoke_result_t<F&, const T&>;
         if (has_value_) {
-            return Result<decltype(f(value_)), E>(f(value_));
+            return Result<U, E>(f(value_));
         }
-        return Result<decltype(f(value_)), E>::Error(error_);
+        return Result<U, E>::Error(error_);
     }
 
     T ValueOr(const T& default_value) const {

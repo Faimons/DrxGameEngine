@@ -85,8 +85,8 @@ vec3 FresnelSchlickRoughness(float cosTheta, vec3 F0, float roughness) {
 float CalculateAttenuation(float distance, float range) {
     float attenuation = 1.0 / (distance * distance);
     float factor = distance / range;
-    float smooth = clamp(1.0 - factor * factor * factor * factor, 0.0, 1.0);
-    return attenuation * smooth * smooth;
+    float falloff = clamp(1.0 - factor * factor * factor * factor, 0.0, 1.0);
+    return attenuation * falloff * falloff;
 }
 
 void main() {

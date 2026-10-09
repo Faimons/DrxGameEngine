@@ -40,7 +40,7 @@ bool Initialize() {
     g_start_time = std::chrono::high_resolution_clock::now();
     g_initialized = true;
 
-    DRX_LOG_INFO("Platform initialized: %s", GetPlatformName());
+    DRX_LOG_INFO("Platform initialized: {}", GetPlatformName());
     return true;
 }
 

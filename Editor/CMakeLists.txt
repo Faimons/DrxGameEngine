@@ -16,6 +16,7 @@ target_link_libraries(DRXEditor PRIVATE
     imgui
     glfw
 )
+drx_set_warnings(DRXEditor)
 
 # Find OpenGL
 find_package(OpenGL REQUIRED)

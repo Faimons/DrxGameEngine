@@ -189,6 +189,32 @@ struct Matrix4 {
         return result;
     }
 
+    /**
+     * Vulkan clip space: right-handed view, Y down, depth in [0, 1].
+     */
+    static Matrix4 PerspectiveVulkan(float32 fovY, float32 aspect, float32 nearZ, float32 farZ) {
+        const float32 f = 1.0f / std::tan(fovY * 0.5f);
+
+        Matrix4 result;
+        result.m[0][0] = f / aspect;
+        result.m[1][1] = -f;
+        result.m[2][2] = farZ / (nearZ - farZ);
+        result.m[2][3] = -1.0f;
+        result.m[3][2] = (nearZ * farZ) / (nearZ - farZ);
+        return result;
+    }
+
+    static Matrix4 OrthographicVulkan(float32 left, float32 right, float32 bottom, float32 top, float32 nearZ, float32 farZ) {
+        Matrix4 result(1.0f);
+        result.m[0][0] = 2.0f / (right - left);
+        result.m[1][1] = -2.0f / (top - bottom);
+        result.m[2][2] = 1.0f / (nearZ - farZ);
+        result.m[3][0] = -(right + left) / (right - left);
+        result.m[3][1] = (top + bottom) / (top - bottom);
+        result.m[3][2] = nearZ / (nearZ - farZ);
+        return result;
+    }
+
     // Instance methods
     Matrix4 Transposed() const {
         Matrix4 result;
@@ -200,7 +226,67 @@ struct Matrix4 {
         return result;
     }
 
-    Matrix4 Inverse() const;
+    float32 Determinant() const {
+        const float32* a = Data();
+        const float32 b00 = a[0] * a[5] - a[1] * a[4];
+        const float32 b01 = a[0] * a[6] - a[2] * a[4];
+        const float32 b02 = a[0] * a[7] - a[3] * a[4];
+        const float32 b03 = a[1] * a[6] - a[2] * a[5];
+        const float32 b04 = a[1] * a[7] - a[3] * a[5];
+        const float32 b05 = a[2] * a[7] - a[3] * a[6];
+        const float32 b06 = a[8] * a[13] - a[9] * a[12];
+        const float32 b07 = a[8] * a[14] - a[10] * a[12];
+        const float32 b08 = a[8] * a[15] - a[11] * a[12];
+        const float32 b09 = a[9] * a[14] - a[10] * a[13];
+        const float32 b10 = a[9] * a[15] - a[11] * a[13];
+        const float32 b11 = a[10] * a[15] - a[11] * a[14];
+        return b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
+    }
+
+    /**
+     * General inverse. Returns identity for singular matrices.
+     */
+    Matrix4 Inverse() const {
+        const float32* a = Data();
+        const float32 b00 = a[0] * a[5] - a[1] * a[4];
+        const float32 b01 = a[0] * a[6] - a[2] * a[4];
+        const float32 b02 = a[0] * a[7] - a[3] * a[4];
+        const float32 b03 = a[1] * a[6] - a[2] * a[5];
+        const float32 b04 = a[1] * a[7] - a[3] * a[5];
+        const float32 b05 = a[2] * a[7] - a[3] * a[6];
+        const float32 b06 = a[8] * a[13] - a[9] * a[12];
+        const float32 b07 = a[8] * a[14] - a[10] * a[12];
+        const float32 b08 = a[8] * a[15] - a[11] * a[12];
+        const float32 b09 = a[9] * a[14] - a[10] * a[13];
+        const float32 b10 = a[9] * a[15] - a[11] * a[13];
+        const float32 b11 = a[10] * a[15] - a[11] * a[14];
+
+        const float32 det = b00 * b11 - b01 * b10 + b02 * b09 + b03 * b08 - b04 * b07 + b05 * b06;
+        if (std::abs(det) < 1e-12f) {
+            return Identity();
+        }
+        const float32 inv_det = 1.0f / det;
+
+        Matrix4 result;
+        float32* r = result.Data();
+        r[0]  = ( a[5] * b11 - a[6] * b10 + a[7] * b09) * inv_det;
+        r[1]  = (-a[1] * b11 + a[2] * b10 - a[3] * b09) * inv_det;
+        r[2]  = ( a[13] * b05 - a[14] * b04 + a[15] * b03) * inv_det;
+        r[3]  = (-a[9] * b05 + a[10] * b04 - a[11] * b03) * inv_det;
+        r[4]  = (-a[4] * b11 + a[6] * b08 - a[7] * b07) * inv_det;
+        r[5]  = ( a[0] * b11 - a[2] * b08 + a[3] * b07) * inv_det;
+        r[6]  = (-a[12] * b05 + a[14] * b02 - a[15] * b01) * inv_det;
+        r[7]  = ( a[8] * b05 - a[10] * b02 + a[11] * b01) * inv_det;
+        r[8]  = ( a[4] * b10 - a[5] * b08 + a[7] * b06) * inv_det;
+        r[9]  = (-a[0] * b10 + a[1] * b08 - a[3] * b06) * inv_det;
+        r[10] = ( a[12] * b04 - a[13] * b02 + a[15] * b00) * inv_det;
+        r[11] = (-a[8] * b04 + a[9] * b02 - a[11] * b00) * inv_det;
+        r[12] = (-a[4] * b09 + a[5] * b07 - a[6] * b06) * inv_det;
+        r[13] = ( a[0] * b09 - a[1] * b07 + a[2] * b06) * inv_det;
+        r[14] = (-a[12] * b03 + a[13] * b01 - a[14] * b00) * inv_det;
+        r[15] = ( a[8] * b03 - a[9] * b01 + a[10] * b00) * inv_det;
+        return result;
+    }
 
     const float32* Data() const {
         return &m[0][0];

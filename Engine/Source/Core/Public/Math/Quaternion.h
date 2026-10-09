@@ -69,24 +69,104 @@ struct Quaternion {
         return Quaternion(n.x * s, n.y * s, n.z * s, std::cos(halfAngle));
     }
 
+    /**
+     * Build rotation from Euler angles in radians (Y-up, applied yaw -> pitch -> roll).
+     * pitch rotates around X, yaw around Y, roll around Z.
+     */
     static Quaternion FromEuler(float32 pitch, float32 yaw, float32 roll) {
-        float32 cp = std::cos(pitch * 0.5f);
-        float32 sp = std::sin(pitch * 0.5f);
-        float32 cy = std::cos(yaw * 0.5f);
-        float32 sy = std::sin(yaw * 0.5f);
-        float32 cr = std::cos(roll * 0.5f);
-        float32 sr = std::sin(roll * 0.5f);
+        const float32 cp = std::cos(pitch * 0.5f);
+        const float32 sp = std::sin(pitch * 0.5f);
+        const float32 cy = std::cos(yaw * 0.5f);
+        const float32 sy = std::sin(yaw * 0.5f);
+        const float32 cr = std::cos(roll * 0.5f);
+        const float32 sr = std::sin(roll * 0.5f);
 
         return Quaternion(
-            sr * cp * cy - cr * sp * sy,
-            cr * sp * cy + sr * cp * sy,
-            cr * cp * sy - sr * sp * cy,
-            cr * cp * cy + sr * sp * sy
+            cy * sp * cr + sy * cp * sr,
+            sy * cp * cr - cy * sp * sr,
+            cy * cp * sr - sy * sp * cr,
+            cy * cp * cr + sy * sp * sr
         );
     }
 
     static Quaternion FromEuler(const Vector3& euler) {
         return FromEuler(euler.x, euler.y, euler.z);
+    }
+
+    /**
+     * Rotation from a rotation matrix (upper 3x3, column-major, orthonormal).
+     */
+    static Quaternion FromRotationMatrix(const Matrix4& mat) {
+        // r(row, col) = mat[col][row]
+        const float32 r00 = mat[0][0], r01 = mat[1][0], r02 = mat[2][0];
+        const float32 r10 = mat[0][1], r11 = mat[1][1], r12 = mat[2][1];
+        const float32 r20 = mat[0][2], r21 = mat[1][2], r22 = mat[2][2];
+        const float32 trace = r00 + r11 + r22;
+
+        Quaternion q;
+        if (trace > 0.0f) {
+            const float32 s = std::sqrt(trace + 1.0f) * 2.0f;
+            q = Quaternion((r21 - r12) / s, (r02 - r20) / s, (r10 - r01) / s, 0.25f * s);
+        } else if (r00 > r11 && r00 > r22) {
+            const float32 s = std::sqrt(1.0f + r00 - r11 - r22) * 2.0f;
+            q = Quaternion(0.25f * s, (r01 + r10) / s, (r02 + r20) / s, (r21 - r12) / s);
+        } else if (r11 > r22) {
+            const float32 s = std::sqrt(1.0f + r11 - r00 - r22) * 2.0f;
+            q = Quaternion((r01 + r10) / s, 0.25f * s, (r12 + r21) / s, (r02 - r20) / s);
+        } else {
+            const float32 s = std::sqrt(1.0f + r22 - r00 - r11) * 2.0f;
+            q = Quaternion((r02 + r20) / s, (r12 + r21) / s, 0.25f * s, (r10 - r01) / s);
+        }
+        return q.Normalized();
+    }
+
+    /**
+     * Rotation whose forward axis (-Z) points along `forward` with `up` as reference.
+     */
+    static Quaternion LookRotation(const Vector3& forward, const Vector3& up = Vector3::Up) {
+        const Vector3 f = forward.Normalized();
+        if (f.LengthSquared() < 1e-12f) {
+            return Identity();
+        }
+
+        Vector3 r = Vector3::Cross(f, up);
+        if (r.LengthSquared() < 1e-12f) {
+            // forward parallel to up: pick any perpendicular reference
+            r = Vector3::Cross(f, std::abs(f.z) < 0.9f ? Vector3::Back : Vector3::Right);
+        }
+        r.Normalize();
+        const Vector3 u = Vector3::Cross(r, f);
+
+        Matrix4 basis(1.0f);
+        basis[0][0] = r.x;  basis[0][1] = r.y;  basis[0][2] = r.z;
+        basis[1][0] = u.x;  basis[1][1] = u.y;  basis[1][2] = u.z;
+        basis[2][0] = -f.x; basis[2][1] = -f.y; basis[2][2] = -f.z;
+        return FromRotationMatrix(basis);
+    }
+
+    /**
+     * Shortest rotation that turns direction `from` into direction `to`.
+     */
+    static Quaternion FromToRotation(const Vector3& from, const Vector3& to) {
+        const Vector3 a = from.Normalized();
+        const Vector3 b = to.Normalized();
+        const float32 d = Vector3::Dot(a, b);
+
+        if (d >= 1.0f - 1e-6f) {
+            return Identity();
+        }
+        if (d <= -1.0f + 1e-6f) {
+            Vector3 axis = Vector3::Cross(Vector3::Right, a);
+            if (axis.LengthSquared() < 1e-6f) {
+                axis = Vector3::Cross(Vector3::Up, a);
+            }
+            return FromAxisAngle(axis, 3.14159265358979323846f);
+        }
+
+        const Vector3 c = Vector3::Cross(a, b);
+        const float32 s = std::sqrt((1.0f + d) * 2.0f);
+        const float32 inv_s = 1.0f / s;
+        return Quaternion(c.x * inv_s, c.y * inv_s, c.z * inv_s, s * 0.5f).Normalized();
     }
 
     static float32 Dot(const Quaternion& a, const Quaternion& b) {
@@ -159,27 +239,24 @@ struct Quaternion {
         return Identity();
     }
 
+    /**
+     * Euler angles in radians as (pitch, yaw, roll), inverse of FromEuler.
+     */
     Vector3 ToEuler() const {
+        constexpr float32 half_pi = 1.57079632679489661923f;
+        const float32 sin_pitch = 2.0f * (w * x - y * z);
+
         Vector3 euler;
-
-        // Roll (x-axis rotation)
-        float32 sinr_cosp = 2.0f * (w * x + y * z);
-        float32 cosr_cosp = 1.0f - 2.0f * (x * x + y * y);
-        euler.x = std::atan2(sinr_cosp, cosr_cosp);
-
-        // Pitch (y-axis rotation)
-        float32 sinp = 2.0f * (w * y - z * x);
-        if (std::abs(sinp) >= 1.0f) {
-            euler.y = std::copysign(3.14159265358979323846f * 0.5f, sinp);
+        if (std::abs(sin_pitch) >= 0.99999f) {
+            // Gimbal lock: fold roll into yaw
+            euler.x = std::copysign(half_pi, sin_pitch);
+            euler.y = std::atan2(-2.0f * (x * z - w * y), 1.0f - 2.0f * (y * y + z * z));
+            euler.z = 0.0f;
         } else {
-            euler.y = std::asin(sinp);
+            euler.x = std::asin(sin_pitch);
+            euler.y = std::atan2(2.0f * (x * z + w * y), 1.0f - 2.0f * (x * x + y * y));
+            euler.z = std::atan2(2.0f * (x * y + w * z), 1.0f - 2.0f * (x * x + z * z));
         }
-
-        // Yaw (z-axis rotation)
-        float32 siny_cosp = 2.0f * (w * z + x * y);
-        float32 cosy_cosp = 1.0f - 2.0f * (y * y + z * z);
-        euler.z = std::atan2(siny_cosp, cosy_cosp);
-
         return euler;
     }
 
@@ -209,6 +286,10 @@ struct Quaternion {
         result[2][2] = 1.0f - 2.0f * (xx + yy);
 
         return result;
+    }
+
+    Vector3 Rotate(const Vector3& v) const {
+        return *this * v;
     }
 
     Vector3 GetForward() const {

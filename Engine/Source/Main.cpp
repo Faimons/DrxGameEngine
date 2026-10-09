@@ -155,10 +155,11 @@ private:
     void OnResize(uint32 width, uint32 height) {
         if (width == 0 || height == 0) return;
 
-        DRX_LOG_INFO("Window resized: %ux%u", width, height);
+        DRX_LOG_INFO("Window resized: {}x{}", width, height);
 
-        graphics_->RecreateSwapChain();
-        renderer_->OnResize(width, height);
+        // The device rebuilds its swap chain at the next present; the renderer
+        // picks up the new swap chain generation on its next BeginFrame.
+        graphics_->NotifyResized();
     }
 
     void OnKey(const HAL::KeyEvent& event) {

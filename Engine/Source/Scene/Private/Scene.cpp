@@ -56,13 +56,13 @@ void Entity::Destroy() {
 Scene::Scene(const String& name)
     : name_(name)
 {
-    DRX_LOG_INFO("Scene created: %s", name.c_str());
+    DRX_LOG_INFO("Scene created: {}", name.c_str());
 }
 
 Scene::~Scene() {
     entities_.clear();
     components_.clear();
-    DRX_LOG_INFO("Scene destroyed: %s", name_.c_str());
+    DRX_LOG_INFO("Scene destroyed: {}", name_.c_str());
 }
 
 Entity Scene::CreateEntity(const String& name) {
@@ -73,7 +73,7 @@ Entity Scene::CreateEntity(const String& name) {
     entity.AddComponent<TransformComponent>();
     entity.AddComponent<NameComponent>(name);
 
-    DRX_LOG_DEBUG("Entity created: %s (id: %u)", name.c_str(), handle.GetId());
+    DRX_LOG_DEBUG("Entity created: {} (id: {})", name.c_str(), handle.GetId());
     return entity;
 }
 
@@ -91,7 +91,7 @@ void Scene::DestroyEntity(Entity entity) {
         entities_.erase(it);
     }
 
-    DRX_LOG_DEBUG("Entity destroyed: %u", handle.GetId());
+    DRX_LOG_DEBUG("Entity destroyed: {}", handle.GetId());
 }
 
 Entity Scene::FindEntityByName(const String& name) {

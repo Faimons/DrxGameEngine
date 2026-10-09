@@ -7,6 +7,7 @@
 #include "Core/Public/CoreTypes.h"
 #include "Core/Public/Platform.h"
 #include "Core/Public/Math/Matrix4.h"
+#include "Core/Public/Math/Vector2.h"
 #include "Core/Public/Math/Vector3.h"
 #include "HAL/Public/GraphicsDevice.h"
 
@@ -72,62 +73,6 @@ struct UniformBufferObject {
 };
 
 // ============================================================================
-// Render Pass
-// ============================================================================
-
-class DRX_API RenderPass {
-public:
-    RenderPass();
-    ~RenderPass();
-
-    bool Initialize(HAL::GraphicsDevice* device);
-    void Shutdown();
-
-    VkRenderPass GetHandle() const { return render_pass_; }
-
-private:
-    HAL::GraphicsDevice* device_ = nullptr;
-    VkRenderPass render_pass_ = VK_NULL_HANDLE;
-};
-
-// ============================================================================
-// Pipeline
-// ============================================================================
-
-struct PipelineConfig {
-    String vertex_shader_path;
-    String fragment_shader_path;
-    VkRenderPass render_pass = VK_NULL_HANDLE;
-    VkPipelineLayout pipeline_layout = VK_NULL_HANDLE;
-    bool enable_depth_test = true;
-    bool enable_blending = false;
-    VkCullModeFlags cull_mode = VK_CULL_MODE_BACK_BIT;
-    VkPolygonMode polygon_mode = VK_POLYGON_MODE_FILL;
-};
-
-class DRX_API Pipeline {
-public:
-    Pipeline();
-    ~Pipeline();
-
-    bool Initialize(HAL::GraphicsDevice* device, const PipelineConfig& config);
-    void Shutdown();
-
-    void Bind(VkCommandBuffer cmd);
-
-    VkPipeline GetHandle() const { return pipeline_; }
-    VkPipelineLayout GetLayout() const { return layout_; }
-
-private:
-    VkShaderModule CreateShaderModule(const Array<byte>& code);
-
-    HAL::GraphicsDevice* device_ = nullptr;
-    VkPipeline pipeline_ = VK_NULL_HANDLE;
-    VkPipelineLayout layout_ = VK_NULL_HANDLE;
-    bool owns_layout_ = false;
-};
-
-// ============================================================================
 // Forward Renderer
 // ============================================================================
 
@@ -136,9 +81,13 @@ public:
     ForwardRenderer();
     ~ForwardRenderer();
 
+    ForwardRenderer(const ForwardRenderer&) = delete;
+    ForwardRenderer& operator=(const ForwardRenderer&) = delete;
+
     bool Initialize(HAL::GraphicsDevice* device);
     void Shutdown();
 
+    // Records into the device's current command buffer between BeginFrame/EndFrame
     void BeginFrame();
     void EndFrame();
 
@@ -147,6 +96,7 @@ public:
 
     void DrawTriangle();
 
+    // Call after the swap chain was recreated
     void OnResize(uint32 width, uint32 height);
 
 private:
@@ -157,14 +107,17 @@ private:
     bool CreateUniformBuffers();
     bool CreateDescriptorPool();
     bool CreateDescriptorSets();
+    bool CreateHostBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkBuffer& buffer, VkDeviceMemory& memory);
 
     void CleanupFramebuffers();
     void UpdateUniformBuffer(uint32 frame_index);
 
     HAL::GraphicsDevice* device_ = nullptr;
+    bool frame_active_ = false;
 
     VkRenderPass render_pass_ = VK_NULL_HANDLE;
     Array<VkFramebuffer> framebuffers_;
+    uint64 swap_chain_generation_ = 0;
 
     VkDescriptorSetLayout descriptor_set_layout_ = VK_NULL_HANDLE;
     VkPipelineLayout pipeline_layout_ = VK_NULL_HANDLE;
@@ -185,6 +138,7 @@ private:
     Math::Matrix4 projection_matrix_;
     Math::Vector3 camera_position_;
 
+    float64 start_time_ = 0.0;
     float32 time_ = 0.0f;
 };
 

@@ -7,9 +7,12 @@
 
 #include "CoreTypes.h"
 #include "Platform.h"
+#include <atomic>
 #include <cstdio>
-#include <cstdarg>
 #include <mutex>
+#include <string_view>
+
+#include <spdlog/fmt/fmt.h>
 
 namespace DRX {
 
@@ -36,14 +39,22 @@ public:
 
     void SetLevel(LogLevel level);
     LogLevel GetLevel() const;
+    bool IsEnabled(LogLevel level) const { return level >= level_.load(std::memory_order_relaxed); }
 
     void SetOutputFile(const String& path);
     void EnableConsoleOutput(bool enable);
     void EnableFileOutput(bool enable);
     void EnableColors(bool enable);
 
-    void Log(LogLevel level, const char* file, int line, const char* fmt, ...);
-    void LogV(LogLevel level, const char* file, int line, const char* fmt, va_list args);
+    template<typename... Args>
+    void Log(LogLevel level, const char* file, int line, fmt::format_string<Args...> format, Args&&... args) {
+        if (!IsEnabled(level)) {
+            return;
+        }
+        Write(level, file, line, fmt::vformat(format, fmt::make_format_args(args...)));
+    }
+
+    void Write(LogLevel level, const char* file, int line, std::string_view message);
 
     void Flush();
 
@@ -54,13 +65,14 @@ private:
     Logger(const Logger&) = delete;
     Logger& operator=(const Logger&) = delete;
 
+    void FlushUnlocked();
     const char* GetLevelString(LogLevel level) const;
     const char* GetLevelColor(LogLevel level) const;
 
-    LogLevel level_ = LogLevel::Info;
-    bool console_output_ = true;
-    bool file_output_ = false;
-    bool colors_enabled_ = true;
+    std::atomic<LogLevel> level_{LogLevel::Info};
+    std::atomic<bool> console_output_{true};
+    std::atomic<bool> file_output_{false};
+    std::atomic<bool> colors_enabled_{true};
     FILE* file_ = nullptr;
     std::mutex mutex_;
 };
@@ -71,27 +83,29 @@ private:
 // Logging Macros
 // ============================================================================
 
-#define DRX_LOG_TRACE(fmt, ...) \
-    DRX::Logger::Instance().Log(DRX::LogLevel::Trace, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define DRX_LOG_TRACE(...) \
+    DRX::Logger::Instance().Log(DRX::LogLevel::Trace, __FILE__, __LINE__, __VA_ARGS__)
 
-#define DRX_LOG_DEBUG(fmt, ...) \
-    DRX::Logger::Instance().Log(DRX::LogLevel::Debug, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define DRX_LOG_DEBUG(...) \
+    DRX::Logger::Instance().Log(DRX::LogLevel::Debug, __FILE__, __LINE__, __VA_ARGS__)
 
-#define DRX_LOG_INFO(fmt, ...) \
-    DRX::Logger::Instance().Log(DRX::LogLevel::Info, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define DRX_LOG_INFO(...) \
+    DRX::Logger::Instance().Log(DRX::LogLevel::Info, __FILE__, __LINE__, __VA_ARGS__)
 
-#define DRX_LOG_WARNING(fmt, ...) \
-    DRX::Logger::Instance().Log(DRX::LogLevel::Warning, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define DRX_LOG_WARNING(...) \
+    DRX::Logger::Instance().Log(DRX::LogLevel::Warning, __FILE__, __LINE__, __VA_ARGS__)
 
-#define DRX_LOG_ERROR(fmt, ...) \
-    DRX::Logger::Instance().Log(DRX::LogLevel::Error, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define DRX_LOG_WARN(...) DRX_LOG_WARNING(__VA_ARGS__)
 
-#define DRX_LOG_FATAL(fmt, ...) \
-    DRX::Logger::Instance().Log(DRX::LogLevel::Fatal, __FILE__, __LINE__, fmt, ##__VA_ARGS__)
+#define DRX_LOG_ERROR(...) \
+    DRX::Logger::Instance().Log(DRX::LogLevel::Error, __FILE__, __LINE__, __VA_ARGS__)
+
+#define DRX_LOG_FATAL(...) \
+    DRX::Logger::Instance().Log(DRX::LogLevel::Fatal, __FILE__, __LINE__, __VA_ARGS__)
 
 // Conditional logging
 #ifdef DRX_DEBUG
-    #define DRX_LOG_DEBUG_ONLY(fmt, ...) DRX_LOG_DEBUG(fmt, ##__VA_ARGS__)
+    #define DRX_LOG_DEBUG_ONLY(...) DRX_LOG_DEBUG(__VA_ARGS__)
 #else
-    #define DRX_LOG_DEBUG_ONLY(fmt, ...) ((void)0)
+    #define DRX_LOG_DEBUG_ONLY(...) ((void)0)
 #endif

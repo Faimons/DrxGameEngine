@@ -5,7 +5,9 @@
 #include "HAL/Public/Window.h"
 #include "Core/Public/Log.h"
 
+#ifndef GLFW_INCLUDE_VULKAN
 #define GLFW_INCLUDE_VULKAN
+#endif
 #include <GLFW/glfw3.h>
 
 namespace DRX::HAL {
@@ -21,11 +23,11 @@ bool Window::InitializeGLFW() {
     }
 
     glfwSetErrorCallback([](int error, const char* description) {
-        DRX_LOG_ERROR("GLFW Error %d: %s", error, description);
+        DRX_LOG_ERROR("GLFW Error {}: {}", error, description);
     });
 
     glfw_initialized_ = true;
-    DRX_LOG_INFO("GLFW initialized: %s", glfwGetVersionString());
+    DRX_LOG_INFO("GLFW initialized: {}", glfwGetVersionString());
     return true;
 }
 
@@ -103,7 +105,7 @@ bool Window::Initialize(const WindowConfig& config) {
     glfwSetWindowFocusCallback(window_, GLFWWindowFocusCallback);
     glfwSetWindowIconifyCallback(window_, GLFWWindowIconifyCallback);
 
-    DRX_LOG_INFO("Window created: %ux%u", width_, height_);
+    DRX_LOG_INFO("Window created: {}x{}", width_, height_);
     return true;
 }
 

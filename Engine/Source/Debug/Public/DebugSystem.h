@@ -9,6 +9,7 @@
 #include "Core/Public/Math/Vector3.h"
 #include "Core/Public/Math/Vector4.h"
 #include "Core/Public/Math/Matrix4.h"
+#include "Core/Public/Math/Quaternion.h"
 
 #include <chrono>
 #include <mutex>

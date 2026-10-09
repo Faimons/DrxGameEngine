@@ -6,6 +6,7 @@ add_executable(DRXTriangleDemo
 )
 
 target_link_libraries(DRXTriangleDemo PRIVATE DRXEngine)
+drx_set_warnings(DRXTriangleDemo)
 
 # Install
 install(TARGETS DRXTriangleDemo RUNTIME DESTINATION bin)

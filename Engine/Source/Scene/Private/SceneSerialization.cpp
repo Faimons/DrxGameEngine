@@ -10,14 +10,18 @@
 #include <fstream>
 #include <sstream>
 
+#ifdef _MSC_VER
 #pragma warning(push)
 #pragma warning(disable: 4005)  // Macro redefinition
 #pragma warning(disable: 4702)  // Unreachable code in rapidjson
+#endif
 
 #include <rapidjson/writer.h>
 #include <rapidjson/prettywriter.h>
 
+#ifdef _MSC_VER
 #pragma warning(pop)
+#endif
 
 #include "Scene/Public/SceneSerialization.h"
 #include "Scene/Public/Entity.h"

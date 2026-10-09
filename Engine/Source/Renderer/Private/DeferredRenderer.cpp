@@ -504,9 +504,7 @@ void DeferredRenderer::SetCamera(const Math::Matrix4& view, const Math::Matrix4&
     lighting_uniforms_.camera_position = {position.x, position.y, position.z, 1.0f};
 
     // Calculate inverse view-projection
-    Math::Matrix4 vp = projection * view;
-    // TODO: Implement matrix inverse
-    lighting_uniforms_.inv_view_projection = vp;
+    lighting_uniforms_.inv_view_projection = (projection * view).Inverse();
 
     UpdateCameraBuffer();
 }

@@ -9,8 +9,10 @@
 #include "Core/Public/Math/Vector2.h"
 #include "Core/Public/Math/Vector3.h"
 #include "Core/Public/Math/Vector4.h"
+#include "Core/Public/Math/Quaternion.h"
 #include "Renderer/Public/Texture.h"
 
+#include <algorithm>
 #include <random>
 
 namespace DRX::Particles {
@@ -22,18 +24,26 @@ struct ParticleData {
     Array<Math::Vector3> positions;
     Array<Math::Vector3> velocities;
     Array<Math::Vector4> colors;
+    Array<Math::Vector4> start_colors;
     Array<float32> sizes;
+    Array<float32> start_sizes;
     Array<float32> rotations;
     Array<float32> angular_velocities;
     Array<float32> lifetimes;
     Array<float32> ages;
     Array<uint32> texture_indices;
+    Array<uint32> start_frames;
 
     uint32 count = 0;
     uint32 capacity = 0;
 
     void Resize(uint32 new_capacity);
-    void Kill(uint32 index);
+    void Kill(uint32 index);  // swap-with-last, invalidates ordering
+
+    // Normalized age in [0, 1]
+    float32 GetNormalizedAge(uint32 index) const {
+        return lifetimes[index] > 0.0f ? std::min(ages[index] / lifetimes[index], 1.0f) : 1.0f;
+    }
 };
 
 /**
@@ -46,6 +56,10 @@ struct RandomRange {
 
     T Sample(std::mt19937& rng) const;
 };
+
+template<> float32 RandomRange<float32>::Sample(std::mt19937& rng) const;
+template<> Math::Vector3 RandomRange<Math::Vector3>::Sample(std::mt19937& rng) const;
+template<> Math::Vector4 RandomRange<Math::Vector4>::Sample(std::mt19937& rng) const;
 
 using FloatRange = RandomRange<float32>;
 using Vector3Range = RandomRange<Math::Vector3>;
@@ -96,8 +110,8 @@ class IParticleModule {
 public:
     virtual ~IParticleModule() = default;
 
-    virtual void Initialize(ParticleData& particles, uint32 start, uint32 count, std::mt19937& rng) {}
-    virtual void Update(ParticleData& particles, float32 delta_time) {}
+    virtual void Initialize(ParticleData& /*particles*/, uint32 /*start*/, uint32 /*count*/, std::mt19937& /*rng*/) {}
+    virtual void Update(ParticleData& /*particles*/, float32 /*delta_time*/) {}
 
     bool enabled = true;
 };
@@ -107,9 +121,8 @@ public:
  */
 class VelocityModule : public IParticleModule {
 public:
-    Vector3Range initial_velocity = {{0, 1, 0}, {0, 5, 0}};
-    float32 inherit_velocity = 0.0f;
-    bool local_space = false;
+    // Added on top of the shape direction * start_speed
+    Vector3Range initial_velocity = {{0, 0, 0}, {0, 0, 0}};
 
     void Initialize(ParticleData& particles, uint32 start, uint32 count, std::mt19937& rng) override;
 };
@@ -168,7 +181,6 @@ public:
     bool random_direction = true;
 
     void Initialize(ParticleData& particles, uint32 start, uint32 count, std::mt19937& rng) override;
-    void Update(ParticleData& particles, float32 delta_time) override;
 };
 
 /**
@@ -195,9 +207,11 @@ public:
 
     CollisionType type = CollisionType::World;
     float32 bounce = 0.5f;
-    float32 lifetime_loss = 0.0f;
+    float32 friction = 0.1f;
+    float32 lifetime_loss = 0.0f;  // fraction of lifetime lost per collision
     float32 radius_scale = 1.0f;
-    Array<Math::Vector4> planes;  // xyz: normal, w: distance
+    float32 ground_height = 0.0f;  // World: horizontal ground plane
+    Array<Math::Vector4> planes;  // Planes: xyz normal, w distance (dot(n, p) = w)
 
     void Update(ParticleData& particles, float32 delta_time) override;
 };
@@ -286,6 +300,7 @@ public:
     // State
     bool IsPlaying() const { return playing_; }
     bool IsAlive() const { return particles_.count > 0 || playing_; }
+    uint32 GetMaxParticles() const { return particles_.capacity; }
     uint32 GetParticleCount() const { return particles_.count; }
     const ParticleData& GetParticles() const { return particles_; }
 
@@ -293,15 +308,21 @@ public:
     void Pause();
     void Stop(bool clear = false);
 
-    // Transform
+    // Transform (relative to the owning system)
     Math::Vector3 position;
     Math::Quaternion rotation;
     bool simulate_in_world_space = true;
+
+    void SetParentTransform(const Math::Vector3& parent_position, const Math::Quaternion& parent_rotation);
+    void SetRandomSeed(uint32 seed) { rng_.seed(seed); }
 
 private:
     void SpawnParticles(uint32 count);
     void UpdateParticles(float32 delta_time);
     void RemoveDeadParticles();
+
+    Math::Vector3 parent_position_;
+    Math::Quaternion parent_rotation_;
 
     ParticleData particles_;
     Array<UniquePtr<IParticleModule>> modules_;
@@ -316,6 +337,7 @@ private:
     uint32 burst_count_ = 0;
     float32 burst_interval_ = 0.0f;
     float32 burst_timer_ = 0.0f;
+    bool burst_fired_ = false;
 
     std::mt19937 rng_;
 };
@@ -325,8 +347,10 @@ private:
  */
 class ParticleSystem {
 public:
-    ParticleSystem();
+    explicit ParticleSystem(const String& name = "ParticleSystem");
     ~ParticleSystem();
+
+    const String& GetName() const { return name_; }
 
     void Update(float32 delta_time);
     void Clear();
@@ -350,6 +374,7 @@ public:
     Math::Vector3 scale = {1, 1, 1};
 
 private:
+    String name_;
     Array<UniquePtr<ParticleEmitter>> emitters_;
     bool playing_ = false;
 };
@@ -365,11 +390,12 @@ public:
     void Shutdown();
     void Update(float32 delta_time);
 
-    SharedPtr<ParticleSystem> CreateSystem();
-    void DestroySystem(SharedPtr<ParticleSystem> system);
+    SharedPtr<ParticleSystem> CreateSystem(const String& name = "ParticleSystem");
+    void DestroySystem(const SharedPtr<ParticleSystem>& system);
 
-    // Load particle system from file
+    // Load a particle system description (JSON) and instantiate a fresh copy
     SharedPtr<ParticleSystem> Load(const String& path);
+    SharedPtr<ParticleSystem> LoadFromString(const String& json, const String& name);
 
     // Global settings
     void SetMaxParticles(uint32 max) { global_max_particles_ = max; }
@@ -384,7 +410,7 @@ private:
     ParticleManager() = default;
 
     Array<SharedPtr<ParticleSystem>> systems_;
-    HashMap<String, SharedPtr<ParticleSystem>> loaded_systems_;
+    HashMap<String, String> loaded_descriptions_;
     uint32 global_max_particles_ = 100000;
     float32 time_scale_ = 1.0f;
 };

@@ -9,6 +9,8 @@
 #include <assimp/scene.h>
 #include <assimp/postprocess.h>
 
+#include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <cmath>
 
@@ -30,6 +32,13 @@ Mesh::~Mesh() {
 
 bool Mesh::Create(HAL::GraphicsDevice* device, const Array<StaticVertex>& vertices,
                   const Array<uint32>& indices, const String& name) {
+    Destroy();
+
+    if (!device) {
+        DRX_LOG_ERROR("Cannot create mesh '{}' without a graphics device", name);
+        return false;
+    }
+
     device_ = device;
     name_ = name;
     vertices_ = vertices;
@@ -37,52 +46,49 @@ bool Mesh::Create(HAL::GraphicsDevice* device, const Array<StaticVertex>& vertic
 
     CalculateBounds();
 
-    if (!CreateVertexBuffer()) {
-        DRX_LOG_ERROR("Failed to create vertex buffer for mesh: {}", name);
+    if (!UploadBuffers()) {
+        DRX_LOG_ERROR("Failed to upload GPU buffers for mesh: {}", name);
+        Destroy();
         return false;
     }
 
-    if (!CreateIndexBuffer()) {
-        DRX_LOG_ERROR("Failed to create index buffer for mesh: {}", name);
-        return false;
-    }
-
-    DRX_LOG_INFO("Created mesh: {} ({} vertices, {} indices)", name, vertices.size(), indices.size());
+    DRX_LOG_DEBUG("Created mesh: {} ({} vertices, {} indices)", name, vertices_.size(), indices_.size());
     return true;
 }
 
 bool Mesh::CreateFromFile(HAL::GraphicsDevice* device, const String& path) {
-    device_ = device;
-    name_ = path;
+    Destroy();
+
+    if (!device) {
+        DRX_LOG_ERROR("Cannot load mesh '{}' without a graphics device", path);
+        return false;
+    }
 
     Assimp::Importer importer;
-
     const aiScene* scene = importer.ReadFile(path,
         aiProcess_Triangulate |
-        aiProcess_GenNormals |
+        aiProcess_GenSmoothNormals |
         aiProcess_CalcTangentSpace |
         aiProcess_FlipUVs |
         aiProcess_JoinIdenticalVertices |
         aiProcess_OptimizeMeshes
     );
 
-    if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) {
+    if (!scene || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) || !scene->mRootNode || scene->mNumMeshes == 0) {
         DRX_LOG_ERROR("Assimp error loading {}: {}", path, importer.GetErrorString());
         return false;
     }
 
-    // Process first mesh only for simple Mesh class
-    if (scene->mNumMeshes > 0) {
-        ProcessAssimpMesh(scene->mMeshes[0], scene);
-    }
+    device_ = device;
+    name_ = path;
 
+    // Simple Mesh holds the first mesh of the file; use Model for full hierarchies
+    ProcessAssimpMesh(scene->mMeshes[0]);
     CalculateBounds();
 
-    if (!CreateVertexBuffer()) {
-        return false;
-    }
-
-    if (!CreateIndexBuffer()) {
+    if (!UploadBuffers()) {
+        DRX_LOG_ERROR("Failed to upload GPU buffers for mesh: {}", path);
+        Destroy();
         return false;
     }
 
@@ -91,36 +97,39 @@ bool Mesh::CreateFromFile(HAL::GraphicsDevice* device, const String& path) {
 }
 
 void Mesh::Destroy() {
-    if (!device_) return;
+    if (device_) {
+        VkDevice vk_device = device_->GetDevice();
 
-    VkDevice vk_device = device_->GetDevice();
-
-    if (vertex_buffer_ != VK_NULL_HANDLE) {
-        vkDestroyBuffer(vk_device, vertex_buffer_, nullptr);
-        vertex_buffer_ = VK_NULL_HANDLE;
+        if (vertex_buffer_ != VK_NULL_HANDLE) {
+            vkDestroyBuffer(vk_device, vertex_buffer_, nullptr);
+        }
+        if (vertex_buffer_memory_ != VK_NULL_HANDLE) {
+            vkFreeMemory(vk_device, vertex_buffer_memory_, nullptr);
+        }
+        if (index_buffer_ != VK_NULL_HANDLE) {
+            vkDestroyBuffer(vk_device, index_buffer_, nullptr);
+        }
+        if (index_buffer_memory_ != VK_NULL_HANDLE) {
+            vkFreeMemory(vk_device, index_buffer_memory_, nullptr);
+        }
     }
 
-    if (vertex_buffer_memory_ != VK_NULL_HANDLE) {
-        vkFreeMemory(vk_device, vertex_buffer_memory_, nullptr);
-        vertex_buffer_memory_ = VK_NULL_HANDLE;
-    }
-
-    if (index_buffer_ != VK_NULL_HANDLE) {
-        vkDestroyBuffer(vk_device, index_buffer_, nullptr);
-        index_buffer_ = VK_NULL_HANDLE;
-    }
-
-    if (index_buffer_memory_ != VK_NULL_HANDLE) {
-        vkFreeMemory(vk_device, index_buffer_memory_, nullptr);
-        index_buffer_memory_ = VK_NULL_HANDLE;
-    }
+    vertex_buffer_ = VK_NULL_HANDLE;
+    vertex_buffer_memory_ = VK_NULL_HANDLE;
+    index_buffer_ = VK_NULL_HANDLE;
+    index_buffer_memory_ = VK_NULL_HANDLE;
 
     vertices_.clear();
     indices_.clear();
+    material_index_ = 0;
+    bounds_ = AABB{};
     device_ = nullptr;
 }
 
 void Mesh::Bind(VkCommandBuffer cmd) const {
+    if (!IsValid()) {
+        return;
+    }
     VkBuffer buffers[] = {vertex_buffer_};
     VkDeviceSize offsets[] = {0};
     vkCmdBindVertexBuffers(cmd, 0, 1, buffers, offsets);
@@ -128,10 +137,16 @@ void Mesh::Bind(VkCommandBuffer cmd) const {
 }
 
 void Mesh::Draw(VkCommandBuffer cmd) const {
+    if (!IsValid()) {
+        return;
+    }
     vkCmdDrawIndexed(cmd, static_cast<uint32>(indices_.size()), 1, 0, 0, 0);
 }
 
 void Mesh::DrawInstanced(VkCommandBuffer cmd, uint32 instance_count) const {
+    if (!IsValid() || instance_count == 0) {
+        return;
+    }
     vkCmdDrawIndexed(cmd, static_cast<uint32>(indices_.size()), instance_count, 0, 0, 0);
 }
 
@@ -389,46 +404,34 @@ Array<VkVertexInputAttributeDescription> Mesh::GetAttributeDescriptions() {
     };
 }
 
-void Mesh::ProcessAssimpMesh(aiMesh* mesh, const aiScene* scene) {
+void Mesh::ProcessAssimpMesh(const aiMesh* mesh) {
+    vertices_.clear();
+    indices_.clear();
     vertices_.reserve(mesh->mNumVertices);
 
     for (uint32 i = 0; i < mesh->mNumVertices; i++) {
         StaticVertex vertex;
-
-        vertex.position = {
-            mesh->mVertices[i].x,
-            mesh->mVertices[i].y,
-            mesh->mVertices[i].z
-        };
+        vertex.position = {mesh->mVertices[i].x, mesh->mVertices[i].y, mesh->mVertices[i].z};
 
         if (mesh->HasNormals()) {
-            vertex.normal = {
-                mesh->mNormals[i].x,
-                mesh->mNormals[i].y,
-                mesh->mNormals[i].z
-            };
+            vertex.normal = {mesh->mNormals[i].x, mesh->mNormals[i].y, mesh->mNormals[i].z};
         }
-
         if (mesh->HasTangentsAndBitangents()) {
-            vertex.tangent = {
-                mesh->mTangents[i].x,
-                mesh->mTangents[i].y,
-                mesh->mTangents[i].z
-            };
+            vertex.tangent = {mesh->mTangents[i].x, mesh->mTangents[i].y, mesh->mTangents[i].z};
         }
-
-        if (mesh->mTextureCoords[0]) {
-            vertex.tex_coord = {
-                mesh->mTextureCoords[0][i].x,
-                mesh->mTextureCoords[0][i].y
-            };
+        if (mesh->HasTextureCoords(0)) {
+            vertex.tex_coord = {mesh->mTextureCoords[0][i].x, mesh->mTextureCoords[0][i].y};
         }
 
         vertices_.push_back(vertex);
     }
 
+    indices_.reserve(static_cast<size_t>(mesh->mNumFaces) * 3);
     for (uint32 i = 0; i < mesh->mNumFaces; i++) {
-        aiFace& face = mesh->mFaces[i];
+        const aiFace& face = mesh->mFaces[i];
+        if (face.mNumIndices != 3) {
+            continue;  // points/lines are not rendered
+        }
         for (uint32 j = 0; j < face.mNumIndices; j++) {
             indices_.push_back(face.mIndices[j]);
         }
@@ -438,159 +441,103 @@ void Mesh::ProcessAssimpMesh(aiMesh* mesh, const aiScene* scene) {
 }
 
 void Mesh::CalculateBounds() {
-    if (vertices_.empty()) return;
+    if (vertices_.empty()) {
+        bounds_ = AABB{};
+        return;
+    }
 
     bounds_.min = vertices_[0].position;
     bounds_.max = vertices_[0].position;
-
     for (const auto& v : vertices_) {
-        bounds_.min.x = std::min(bounds_.min.x, v.position.x);
-        bounds_.min.y = std::min(bounds_.min.y, v.position.y);
-        bounds_.min.z = std::min(bounds_.min.z, v.position.z);
-        bounds_.max.x = std::max(bounds_.max.x, v.position.x);
-        bounds_.max.y = std::max(bounds_.max.y, v.position.y);
-        bounds_.max.z = std::max(bounds_.max.z, v.position.z);
+        bounds_.Expand(v.position);
     }
 }
 
-bool Mesh::CreateVertexBuffer() {
-    VkDevice vk_device = device_->GetDevice();
-    VkDeviceSize buffer_size = sizeof(StaticVertex) * vertices_.size();
+bool Mesh::UploadBuffers() {
+    if (vertices_.empty() || indices_.empty()) {
+        DRX_LOG_ERROR("Mesh '{}' has no geometry", name_);
+        return false;
+    }
 
-    // Create staging buffer
-    VkBuffer staging_buffer;
-    VkDeviceMemory staging_memory;
+    for (uint32 index : indices_) {
+        if (index >= vertices_.size()) {
+            DRX_LOG_ERROR("Mesh '{}' has out-of-range index {} (vertex count {})", name_, index, vertices_.size());
+            return false;
+        }
+    }
 
-    VkBufferCreateInfo staging_info{};
-    staging_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    staging_info.size = buffer_size;
-    staging_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    staging_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-    vkCreateBuffer(vk_device, &staging_info, nullptr, &staging_buffer);
-
-    VkMemoryRequirements mem_requirements;
-    vkGetBufferMemoryRequirements(vk_device, staging_buffer, &mem_requirements);
-
-    VkMemoryAllocateInfo alloc_info{};
-    alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    alloc_info.allocationSize = mem_requirements.size;
-    alloc_info.memoryTypeIndex = device_->FindMemoryType(
-        mem_requirements.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-    );
-
-    vkAllocateMemory(vk_device, &alloc_info, nullptr, &staging_memory);
-    vkBindBufferMemory(vk_device, staging_buffer, staging_memory, 0);
-
-    void* data;
-    vkMapMemory(vk_device, staging_memory, 0, buffer_size, 0, &data);
-    std::memcpy(data, vertices_.data(), buffer_size);
-    vkUnmapMemory(vk_device, staging_memory);
-
-    // Create vertex buffer
-    VkBufferCreateInfo buffer_info{};
-    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    buffer_info.size = buffer_size;
-    buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
-    buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-    vkCreateBuffer(vk_device, &buffer_info, nullptr, &vertex_buffer_);
-
-    vkGetBufferMemoryRequirements(vk_device, vertex_buffer_, &mem_requirements);
-
-    alloc_info.allocationSize = mem_requirements.size;
-    alloc_info.memoryTypeIndex = device_->FindMemoryType(
-        mem_requirements.memoryTypeBits,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
-    );
-
-    vkAllocateMemory(vk_device, &alloc_info, nullptr, &vertex_buffer_memory_);
-    vkBindBufferMemory(vk_device, vertex_buffer_, vertex_buffer_memory_, 0);
-
-    // Copy staging to vertex buffer
-    VkCommandBuffer cmd = device_->BeginSingleTimeCommands();
-
-    VkBufferCopy copy_region{};
-    copy_region.size = buffer_size;
-    vkCmdCopyBuffer(cmd, staging_buffer, vertex_buffer_, 1, &copy_region);
-
-    device_->EndSingleTimeCommands(cmd);
-
-    vkDestroyBuffer(vk_device, staging_buffer, nullptr);
-    vkFreeMemory(vk_device, staging_memory, nullptr);
-
-    return true;
+    return CreateDeviceBuffer(vertices_.data(), sizeof(StaticVertex) * vertices_.size(),
+                              VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertex_buffer_, vertex_buffer_memory_) &&
+           CreateDeviceBuffer(indices_.data(), sizeof(uint32) * indices_.size(),
+                              VK_BUFFER_USAGE_INDEX_BUFFER_BIT, index_buffer_, index_buffer_memory_);
 }
 
-bool Mesh::CreateIndexBuffer() {
+bool Mesh::CreateDeviceBuffer(const void* data, VkDeviceSize size, VkBufferUsageFlags usage,
+                              VkBuffer& buffer, VkDeviceMemory& memory) {
     VkDevice vk_device = device_->GetDevice();
-    VkDeviceSize buffer_size = sizeof(uint32) * indices_.size();
 
-    // Create staging buffer
-    VkBuffer staging_buffer;
-    VkDeviceMemory staging_memory;
+    auto create_buffer = [&](VkBufferUsageFlags buffer_usage, VkMemoryPropertyFlags properties,
+                             VkBuffer& out_buffer, VkDeviceMemory& out_memory) -> bool {
+        VkBufferCreateInfo buffer_info{};
+        buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        buffer_info.size = size;
+        buffer_info.usage = buffer_usage;
+        buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
 
-    VkBufferCreateInfo staging_info{};
-    staging_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    staging_info.size = buffer_size;
-    staging_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    staging_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(vk_device, &buffer_info, nullptr, &out_buffer) != VK_SUCCESS) {
+            out_buffer = VK_NULL_HANDLE;
+            return false;
+        }
 
-    vkCreateBuffer(vk_device, &staging_info, nullptr, &staging_buffer);
+        VkMemoryRequirements requirements;
+        vkGetBufferMemoryRequirements(vk_device, out_buffer, &requirements);
 
-    VkMemoryRequirements mem_requirements;
-    vkGetBufferMemoryRequirements(vk_device, staging_buffer, &mem_requirements);
+        VkMemoryAllocateInfo alloc_info{};
+        alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+        alloc_info.allocationSize = requirements.size;
+        alloc_info.memoryTypeIndex = device_->FindMemoryType(requirements.memoryTypeBits, properties);
 
-    VkMemoryAllocateInfo alloc_info{};
-    alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
-    alloc_info.allocationSize = mem_requirements.size;
-    alloc_info.memoryTypeIndex = device_->FindMemoryType(
-        mem_requirements.memoryTypeBits,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-    );
+        if (vkAllocateMemory(vk_device, &alloc_info, nullptr, &out_memory) != VK_SUCCESS) {
+            vkDestroyBuffer(vk_device, out_buffer, nullptr);
+            out_buffer = VK_NULL_HANDLE;
+            out_memory = VK_NULL_HANDLE;
+            return false;
+        }
 
-    vkAllocateMemory(vk_device, &alloc_info, nullptr, &staging_memory);
-    vkBindBufferMemory(vk_device, staging_buffer, staging_memory, 0);
+        vkBindBufferMemory(vk_device, out_buffer, out_memory, 0);
+        return true;
+    };
 
-    void* data;
-    vkMapMemory(vk_device, staging_memory, 0, buffer_size, 0, &data);
-    std::memcpy(data, indices_.data(), buffer_size);
+    VkBuffer staging_buffer = VK_NULL_HANDLE;
+    VkDeviceMemory staging_memory = VK_NULL_HANDLE;
+    if (!create_buffer(VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                       VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                       staging_buffer, staging_memory)) {
+        return false;
+    }
+
+    void* mapped = nullptr;
+    if (vkMapMemory(vk_device, staging_memory, 0, size, 0, &mapped) != VK_SUCCESS) {
+        vkDestroyBuffer(vk_device, staging_buffer, nullptr);
+        vkFreeMemory(vk_device, staging_memory, nullptr);
+        return false;
+    }
+    std::memcpy(mapped, data, static_cast<size_t>(size));
     vkUnmapMemory(vk_device, staging_memory);
 
-    // Create index buffer
-    VkBufferCreateInfo buffer_info{};
-    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
-    buffer_info.size = buffer_size;
-    buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
-    buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-
-    vkCreateBuffer(vk_device, &buffer_info, nullptr, &index_buffer_);
-
-    vkGetBufferMemoryRequirements(vk_device, index_buffer_, &mem_requirements);
-
-    alloc_info.allocationSize = mem_requirements.size;
-    alloc_info.memoryTypeIndex = device_->FindMemoryType(
-        mem_requirements.memoryTypeBits,
-        VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
-    );
-
-    vkAllocateMemory(vk_device, &alloc_info, nullptr, &index_buffer_memory_);
-    vkBindBufferMemory(vk_device, index_buffer_, index_buffer_memory_, 0);
-
-    // Copy staging to index buffer
-    VkCommandBuffer cmd = device_->BeginSingleTimeCommands();
-
-    VkBufferCopy copy_region{};
-    copy_region.size = buffer_size;
-    vkCmdCopyBuffer(cmd, staging_buffer, index_buffer_, 1, &copy_region);
-
-    device_->EndSingleTimeCommands(cmd);
+    const bool created = create_buffer(VK_BUFFER_USAGE_TRANSFER_DST_BIT | usage,
+                                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, buffer, memory);
+    if (created) {
+        VkCommandBuffer cmd = device_->BeginSingleTimeCommands();
+        VkBufferCopy copy_region{};
+        copy_region.size = size;
+        vkCmdCopyBuffer(cmd, staging_buffer, buffer, 1, &copy_region);
+        device_->EndSingleTimeCommands(cmd);
+    }
 
     vkDestroyBuffer(vk_device, staging_buffer, nullptr);
     vkFreeMemory(vk_device, staging_memory, nullptr);
-
-    return true;
+    return created;
 }
 
 // ============================================================================
@@ -604,48 +551,52 @@ Model::~Model() {
 }
 
 bool Model::LoadFromFile(HAL::GraphicsDevice* device, const String& path) {
-    device_ = device;
-    name_ = path;
+    Destroy();
+
+    if (!device) {
+        DRX_LOG_ERROR("Cannot load model '{}' without a graphics device", path);
+        return false;
+    }
 
     Assimp::Importer importer;
-
     const aiScene* scene = importer.ReadFile(path,
         aiProcess_Triangulate |
-        aiProcess_GenNormals |
+        aiProcess_GenSmoothNormals |
         aiProcess_CalcTangentSpace |
         aiProcess_FlipUVs |
         aiProcess_JoinIdenticalVertices |
         aiProcess_OptimizeMeshes
     );
 
-    if (!scene || scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE || !scene->mRootNode) {
+    if (!scene || (scene->mFlags & AI_SCENE_FLAGS_INCOMPLETE) || !scene->mRootNode) {
         DRX_LOG_ERROR("Assimp error loading model {}: {}", path, importer.GetErrorString());
         return false;
     }
 
+    device_ = device;
+    name_ = path;
     ProcessNode(scene->mRootNode, scene);
 
     DRX_LOG_INFO("Loaded model: {} ({} meshes)", path, meshes_.size());
-    return true;
+    return !meshes_.empty();
 }
 
 void Model::Destroy() {
     meshes_.clear();
-    materials_.clear();
+    bounds_ = AABB{};
     device_ = nullptr;
 }
 
 void Model::Draw(VkCommandBuffer cmd) const {
-    for (size_t i = 0; i < meshes_.size(); i++) {
-        meshes_[i]->Bind(cmd);
-        meshes_[i]->Draw(cmd);
+    for (const auto& mesh : meshes_) {
+        mesh->Bind(cmd);
+        mesh->Draw(cmd);
     }
 }
 
-void Model::ProcessNode(aiNode* node, const aiScene* scene) {
+void Model::ProcessNode(const aiNode* node, const aiScene* scene) {
     for (uint32 i = 0; i < node->mNumMeshes; i++) {
-        aiMesh* mesh = scene->mMeshes[node->mMeshes[i]];
-        auto drx_mesh = MakeShared<Mesh>();
+        const aiMesh* mesh = scene->mMeshes[node->mMeshes[i]];
 
         Array<StaticVertex> vertices;
         Array<uint32> indices;
@@ -654,30 +605,39 @@ void Model::ProcessNode(aiNode* node, const aiScene* scene) {
         for (uint32 j = 0; j < mesh->mNumVertices; j++) {
             StaticVertex vertex;
             vertex.position = {mesh->mVertices[j].x, mesh->mVertices[j].y, mesh->mVertices[j].z};
-
             if (mesh->HasNormals()) {
                 vertex.normal = {mesh->mNormals[j].x, mesh->mNormals[j].y, mesh->mNormals[j].z};
             }
-
             if (mesh->HasTangentsAndBitangents()) {
                 vertex.tangent = {mesh->mTangents[j].x, mesh->mTangents[j].y, mesh->mTangents[j].z};
             }
-
-            if (mesh->mTextureCoords[0]) {
+            if (mesh->HasTextureCoords(0)) {
                 vertex.tex_coord = {mesh->mTextureCoords[0][j].x, mesh->mTextureCoords[0][j].y};
             }
-
             vertices.push_back(vertex);
         }
 
+        indices.reserve(static_cast<size_t>(mesh->mNumFaces) * 3);
         for (uint32 j = 0; j < mesh->mNumFaces; j++) {
-            aiFace& face = mesh->mFaces[j];
+            const aiFace& face = mesh->mFaces[j];
+            if (face.mNumIndices != 3) {
+                continue;
+            }
             for (uint32 k = 0; k < face.mNumIndices; k++) {
                 indices.push_back(face.mIndices[k]);
             }
         }
 
-        drx_mesh->Create(device_, vertices, indices, mesh->mName.C_Str());
+        auto drx_mesh = MakeShared<Mesh>();
+        if (!drx_mesh->Create(device_, vertices, indices, mesh->mName.C_Str())) {
+            continue;
+        }
+
+        if (meshes_.empty()) {
+            bounds_ = drx_mesh->GetBounds();
+        } else {
+            bounds_.Merge(drx_mesh->GetBounds());
+        }
         meshes_.push_back(drx_mesh);
     }
 
@@ -712,6 +672,11 @@ void MeshManager::Shutdown() {
 }
 
 SharedPtr<Mesh> MeshManager::Load(const String& path) {
+    if (!device_) {
+        DRX_LOG_ERROR("MeshManager not initialized, cannot load {}", path);
+        return nullptr;
+    }
+
     auto it = meshes_.find(path);
     if (it != meshes_.end()) {
         return it->second;

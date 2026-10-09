@@ -57,13 +57,13 @@ void LogMemoryStats() {
 #ifdef DRX_DEBUG
     auto stats = GetMemoryStats();
     DRX_LOG_INFO("=== Memory Statistics ===");
-    DRX_LOG_INFO("Total allocations: %llu", stats.total_allocations);
-    DRX_LOG_INFO("Total bytes allocated: %llu (%.2f MB)",
+    DRX_LOG_INFO("Total allocations: {}", stats.total_allocations);
+    DRX_LOG_INFO("Total bytes allocated: {} ({:.2f} MB)",
                  stats.total_bytes, stats.total_bytes / (1024.0 * 1024.0));
-    DRX_LOG_INFO("Current allocations: %llu", stats.current_allocations);
-    DRX_LOG_INFO("Current bytes: %llu (%.2f MB)",
+    DRX_LOG_INFO("Current allocations: {}", stats.current_allocations);
+    DRX_LOG_INFO("Current bytes: {} ({:.2f} MB)",
                  stats.current_bytes, stats.current_bytes / (1024.0 * 1024.0));
-    DRX_LOG_INFO("Peak bytes: %llu (%.2f MB)",
+    DRX_LOG_INFO("Peak bytes: {} ({:.2f} MB)",
                  stats.peak_bytes, stats.peak_bytes / (1024.0 * 1024.0));
 #endif
 }

@@ -529,6 +529,26 @@ void ScriptEngine::DestroyScript(SharedPtr<LuaScript> script) {
     }
 }
 
+void ScriptEngine::RegisterClassMetatable(const String& name, NativeCallback gc) {
+    if (!L_) {
+        return;
+    }
+
+    luaL_newmetatable(L_, name.c_str());
+
+    lua_pushvalue(L_, -1);
+    lua_setfield(L_, -2, "__index");
+
+    lua_pushcfunction(L_, gc);
+    lua_setfield(L_, -2, "__gc");
+
+    lua_pop(L_, 1);
+}
+
+void* ScriptEngine::GetUserdata(lua_State* L, int index) {
+    return lua_touserdata(L, index);
+}
+
 void ScriptEngine::RegisterFunction(const String& name, ScriptFunction func) {
     registered_functions_[name] = func;
 

@@ -27,7 +27,6 @@ bool TerrainChunk::Generate(const float32* heightmap_data, uint32 heightmap_widt
                              float32 height_scale, float32 terrain_size) {
     if (!heightmap_data) return false;
 
-    uint32 chunk_size = resolution_;
     float32 chunk_world_size = terrain_size / std::sqrt(static_cast<float32>(heightmap_width));
 
     // Calculate world position of chunk center
@@ -93,11 +92,11 @@ void TerrainChunk::GenerateMesh(uint32 lod) {
             vertex.position.z = bounds_min_.z + fz * (bounds_max_.z - bounds_min_.z);
             vertex.position.y = heights_[z * (resolution_ + 1) + x];
 
-            vertex.texcoord.x = fx;
-            vertex.texcoord.y = fz;
+            vertex.tex_coord.x = fx;
+            vertex.tex_coord.y = fz;
 
             vertex.normal = Math::Vector3(0, 1, 0);  // Will be calculated later
-            vertex.tangent = Math::Vector4(1, 0, 0, 1);
+            vertex.tangent = Math::Vector3(1, 0, 0);
 
             vertices.push_back(vertex);
         }
@@ -168,7 +167,7 @@ void TerrainChunk::GenerateNormals(Array<Renderer::StaticVertex>& vertices,
         if (tangent.LengthSquared() < 0.001f) {
             tangent = Math::Vector3::Cross(v.normal, Math::Vector3::Forward).Normalized();
         }
-        v.tangent = Math::Vector4(tangent.x, tangent.y, tangent.z, 1.0f);
+        v.tangent = tangent;
     }
 }
 
@@ -740,12 +739,10 @@ void TerrainFoliage::Generate(const TerrainHeightmap& heightmap, const TerrainSp
 
             // Rotation
             if (type.align_to_normal) {
-                Math::Vector3 up = normal;
-                Math::Vector3 forward = Math::Vector3::Cross(Math::Vector3::Right, up).Normalized();
-                Math::Vector3 right = Math::Vector3::Cross(up, forward);
-
+                // Tilt up-axis onto the surface normal, then spin around it
                 float32 yaw = type.random_rotation ? dis(gen) * 360.0f : 0;
-                instance.rotation = Math::Quaternion::FromAxisAngle(up, yaw * 3.14159265359f / 180.0f);
+                instance.rotation = Math::Quaternion::FromAxisAngle(normal, yaw * 3.14159265359f / 180.0f) *
+                                    Math::Quaternion::FromToRotation(Math::Vector3::Up, normal);
             } else {
                 float32 yaw = type.random_rotation ? dis(gen) * 360.0f : 0;
                 instance.rotation = Math::Quaternion::FromAxisAngle(Math::Vector3::Up, yaw * 3.14159265359f / 180.0f);

@@ -7,6 +7,7 @@
 
 #include <GLFW/glfw3.h>
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <imgui_impl_glfw.h>
 #include <imgui_impl_opengl3.h>
 
@@ -224,6 +225,43 @@ void EditorApplication::RenderUI() {
     ImGui::PopStyleVar(3);
 
     ImGuiID dockspace_id = ImGui::GetID("MainDockSpace");
+
+    // Build the default layout once when no saved layout exists
+    if (!dock_layout_checked_) {
+        dock_layout_checked_ = true;
+        ImGuiDockNode* node = ImGui::DockBuilderGetNode(dockspace_id);
+        if (node == nullptr || !node->IsSplitNode()) {
+            ImGui::DockBuilderRemoveNode(dockspace_id);
+            ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
+            ImGui::DockBuilderSetNodeSize(dockspace_id, viewport->WorkSize);
+
+            const ImVec2 size = viewport->WorkSize;
+            ImGuiID center = dockspace_id;
+            ImGuiID toolbar = ImGui::DockBuilderSplitNode(center, ImGuiDir_Up, 0.06f, nullptr, &center);
+            ImGuiID left = ImGui::DockBuilderSplitNode(center, ImGuiDir_Left, 0.18f, nullptr, &center);
+            ImGuiID right = ImGui::DockBuilderSplitNode(center, ImGuiDir_Right, 0.25f, nullptr, &center);
+            ImGuiID bottom = ImGui::DockBuilderSplitNode(center, ImGuiDir_Down, 0.28f, nullptr, &center);
+
+            // Explicit sizes keep the side panels usable regardless of split order
+            ImGui::DockBuilderSetNodeSize(toolbar, ImVec2(size.x, 48.0f));
+            ImGui::DockBuilderSetNodeSize(left, ImVec2(size.x * 0.18f, size.y));
+            ImGui::DockBuilderSetNodeSize(right, ImVec2(size.x * 0.22f, size.y));
+            ImGui::DockBuilderSetNodeSize(bottom, ImVec2(size.x * 0.6f, size.y * 0.28f));
+
+            if (ImGuiDockNode* toolbar_node = ImGui::DockBuilderGetNode(toolbar)) {
+                toolbar_node->LocalFlags |= ImGuiDockNodeFlags_NoTabBar | ImGuiDockNodeFlags_NoResize;
+            }
+
+            ImGui::DockBuilderDockWindow("##Toolbar", toolbar);
+            ImGui::DockBuilderDockWindow("Hierarchy", left);
+            ImGui::DockBuilderDockWindow("Inspector", right);
+            ImGui::DockBuilderDockWindow("Assets", bottom);
+            ImGui::DockBuilderDockWindow("Console", bottom);
+            ImGui::DockBuilderDockWindow("Viewport", center);
+            ImGui::DockBuilderFinish(dockspace_id);
+        }
+    }
+
     ImGui::DockSpace(dockspace_id, ImVec2(0.0f, 0.0f), ImGuiDockNodeFlags_PassthruCentralNode);
 
     // Render menu bar and panels
@@ -325,7 +363,6 @@ void EditorApplication::RenderMainMenu() {
 }
 
 void EditorApplication::RenderToolbar() {
-    ImGui::SetNextWindowSize(ImVec2(0, 50), ImGuiCond_Always);
     ImGuiWindowFlags flags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
                              ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoCollapse;
 
@@ -353,7 +390,7 @@ void EditorApplication::RenderToolbar() {
         ImGui::EndDisabled();
 
         ImGui::SameLine();
-        ImGui::SeparatorEx(ImGuiSeparatorFlags_Vertical);
+        ImGui::TextDisabled("|");
         ImGui::SameLine();
 
         // Gizmo mode buttons
@@ -528,7 +565,7 @@ void EditorApplication::RenderInspector() {
 
         } else {
             ImGui::TextDisabled("No entity selected");
-            ImGui::Text("");
+            ImGui::Spacing();
             ImGui::Text("Select an entity in the");
             ImGui::Text("Hierarchy to view its properties.");
         }
@@ -551,11 +588,14 @@ void EditorApplication::RenderTransformComponent() {
         }
 
         // Rotation
+        // Shown in degrees as (pitch, yaw, roll)
+        constexpr float kRadToDeg = 57.29577951308232f;
+        constexpr float kDegToRad = 0.017453292519943295f;
         Math::Vector3 euler = t.rotation.ToEuler();
-        float rot[3] = {euler.x, euler.y, euler.z};
+        float rot[3] = {euler.x * kRadToDeg, euler.y * kRadToDeg, euler.z * kRadToDeg};
         ImGui::Text("Rotation");
         if (ImGui::DragFloat3("##Rot", rot, 1.0f)) {
-            t.rotation = Math::Quaternion::FromEuler({rot[0], rot[1], rot[2]});
+            t.rotation = Math::Quaternion::FromEuler(rot[0] * kDegToRad, rot[1] * kDegToRad, rot[2] * kDegToRad);
             scene_modified_ = true;
         }
 
@@ -568,9 +608,9 @@ void EditorApplication::RenderTransformComponent() {
         }
 
         if (ImGui::Button("Reset Transform")) {
-            t.position = Math::Vector3::Zero();
+            t.position = Math::Vector3::Zero;
             t.rotation = Math::Quaternion::Identity();
-            t.scale = Math::Vector3::One();
+            t.scale = Math::Vector3::One;
             scene_modified_ = true;
         }
     }
@@ -992,9 +1032,9 @@ Scene::EntityData* EditorApplication::CreateEntity(const String& name) {
     entity.id = next_entity_id_++;
     entity.name = name;
     entity.enabled = true;
-    entity.transform.position = Math::Vector3::Zero();
+    entity.transform.position = Math::Vector3::Zero;
     entity.transform.rotation = Math::Quaternion::Identity();
-    entity.transform.scale = Math::Vector3::One();
+    entity.transform.scale = Math::Vector3::One;
 
     current_scene_.entities.push_back(entity);
     scene_modified_ = true;

@@ -265,6 +265,20 @@ ResourceHandle<T> ResourceManager::Get(const String& path) {
     return ResourceHandle<T>();
 }
 
+struct TextureImportSettings {
+    bool generate_mipmaps = true;
+    bool compress = true;
+    bool srgb = true;
+    uint32 max_size = 4096;
+};
+
+struct MeshImportSettings {
+    bool optimize = true;
+    bool generate_tangents = true;
+    bool generate_normals = true;
+    float scale = 1.0f;
+};
+
 /**
  * Asset Importer - converts raw assets to engine format
  */
@@ -276,19 +290,8 @@ public:
     void Shutdown();
 
     // Import settings
-    struct TextureImportSettings {
-        bool generate_mipmaps = true;
-        bool compress = true;
-        bool srgb = true;
-        uint32 max_size = 4096;
-    };
-
-    struct MeshImportSettings {
-        bool optimize = true;
-        bool generate_tangents = true;
-        bool generate_normals = true;
-        float scale = 1.0f;
-    };
+    using TextureImportSettings = Resource::TextureImportSettings;
+    using MeshImportSettings = Resource::MeshImportSettings;
 
     // Import functions
     bool ImportTexture(const String& source, const String& dest, const TextureImportSettings& settings = {});
