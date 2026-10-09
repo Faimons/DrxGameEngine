@@ -10,7 +10,7 @@
 #include "Core/Public/Math/Vector3.h"
 #include "Core/Public/Math/Vector4.h"
 #include "Core/Public/Math/Quaternion.h"
-#include "Renderer/Public/Texture.h"
+
 
 #include <algorithm>
 #include <random>
@@ -271,7 +271,7 @@ public:
     EmissionShapeParams emission_shape;
 
     // Rendering
-    SharedPtr<Renderer::Texture> texture;
+    TextureHandle texture;   // invalid = renderer's soft particle sprite
     enum class RenderMode { Billboard, StretchedBillboard, HorizontalBillboard, VerticalBillboard, Mesh };
     RenderMode render_mode = RenderMode::Billboard;
     enum class BlendMode { Additive, AlphaBlend, Multiply };
@@ -297,6 +297,16 @@ public:
         return nullptr;
     }
 
+    template<typename T>
+    const T* GetModule() const {
+        for (const auto& module : modules_) {
+            if (const auto* m = dynamic_cast<const T*>(module.get())) {
+                return m;
+            }
+        }
+        return nullptr;
+    }
+
     // State
     bool IsPlaying() const { return playing_; }
     bool IsAlive() const { return particles_.count > 0 || playing_; }
@@ -314,6 +324,10 @@ public:
     bool simulate_in_world_space = true;
 
     void SetParentTransform(const Math::Vector3& parent_position, const Math::Quaternion& parent_rotation);
+
+    // Emitter transform in world space (particles of local-space emitters are relative to it)
+    Math::Vector3 GetWorldPosition() const { return parent_position_ + parent_rotation_ * position; }
+    Math::Quaternion GetWorldRotation() const { return (parent_rotation_ * rotation).Normalized(); }
     void SetRandomSeed(uint32 seed) { rng_.seed(seed); }
 
 private:

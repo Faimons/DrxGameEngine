@@ -104,7 +104,31 @@ public:
     VkCommandBuffer BeginSingleTimeCommands();
     void EndSingleTimeCommands(VkCommandBuffer command_buffer);
 
+    // Returns UINT32_MAX when no memory type matches
     uint32 FindMemoryType(uint32 type_filter, VkMemoryPropertyFlags properties);
+
+    // Buffer/image creation with memory allocation and binding; handles are reset on failure
+    bool CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
+                      VkBuffer& buffer, VkDeviceMemory& memory);
+    bool CreateImage(const VkImageCreateInfo& info, VkMemoryPropertyFlags properties,
+                     VkImage& image, VkDeviceMemory& memory);
+    void DestroyBuffer(VkBuffer& buffer, VkDeviceMemory& memory);
+    void DestroyImage(VkImage& image, VkDeviceMemory& memory);
+
+    // Copies `data` into a device-local buffer through a staging buffer (blocking)
+    bool UploadBuffer(VkBuffer destination, const void* data, VkDeviceSize size);
+    // Copies tightly packed pixels into mip 0 of an image and leaves it shader-readable (blocking)
+    bool UploadImage(VkImage destination, uint32 width, uint32 height, const void* data,
+                     VkDeviceSize size, uint32 mip_levels = 1);
+
+    // Best supported depth format for depth attachments (sampled if requested)
+    VkFormat FindDepthFormat(bool sampled = false) const;
+
+    bool IsAnisotropyEnabled() const { return anisotropy_enabled_; }
+    bool SwapChainSupportsCopy() const { return swap_chain_supports_copy_; }
+    VkImage GetSwapChainImage(uint32 index) const { return index < swap_chain_images_.size() ? swap_chain_images_[index] : VK_NULL_HANDLE; }
+    float32 GetMaxAnisotropy() const { return max_anisotropy_; }
+    bool IsValidationEnabled() const { return config_.enable_validation; }
 
 private:
     bool CreateInstance();
@@ -163,6 +187,9 @@ private:
     uint32 max_frames_in_flight_ = 2;
     uint64 swap_chain_generation_ = 0;
     bool framebuffer_resized_ = false;
+    bool anisotropy_enabled_ = false;
+    bool swap_chain_supports_copy_ = false;
+    float32 max_anisotropy_ = 1.0f;
 
     // Configuration
     GraphicsConfig config_;

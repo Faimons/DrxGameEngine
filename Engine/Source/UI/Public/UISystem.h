@@ -8,7 +8,7 @@
 #include "Core/Public/CoreTypes.h"
 #include "Core/Public/Math/Vector2.h"
 #include "Core/Public/Math/Vector4.h"
-#include "Renderer/Public/Texture.h"
+
 
 namespace DRX::UI {
 
@@ -45,7 +45,7 @@ struct DrawCommand {
     String text;
     float32 font_size = 14.0f;
     float32 thickness = 1.0f;
-    SharedPtr<Renderer::Texture> texture;
+    TextureHandle texture;
 };
 
 /**
@@ -150,7 +150,7 @@ public:
     bool InputFloat(const String& label, float32& value);
     bool ColorEdit(const String& label, Math::Vector4& color);
     bool Combo(const String& label, int32& current_item, const Array<String>& items);
-    void Image(SharedPtr<Renderer::Texture> texture, const Math::Vector2& size);
+    void Image(TextureHandle texture, const Math::Vector2& size);
     void ProgressBar(float32 progress, const Math::Vector2& size);
 
     // ID stack
@@ -164,7 +164,7 @@ public:
     void DrawText(const String& text, float32 x, float32 y, const Math::Vector4& color, float32 font_size = 0.0f);
     void DrawLine(const Math::Vector2& from, const Math::Vector2& to, const Math::Vector4& color, float32 thickness = 1.0f);
     void DrawCircle(const Math::Vector2& center, float32 radius, const Math::Vector4& color);
-    void DrawImage(const Rect& rect, SharedPtr<Renderer::Texture> texture, const Math::Vector4& tint = {1, 1, 1, 1});
+    void DrawImage(const Rect& rect, TextureHandle texture, const Math::Vector4& tint = {1, 1, 1, 1});
 
     float32 GetTextWidth(const String& text, float32 font_size = 0.0f) const;
     void SetTextMeasureFunc(TextMeasureFunc func) { text_measure_ = std::move(func); }

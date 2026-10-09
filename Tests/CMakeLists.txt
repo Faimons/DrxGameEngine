@@ -20,6 +20,7 @@ add_executable(DRXTests
     UnitTests/TestMath.cpp
     UnitTests/TestCore.cpp
     UnitTests/TestSystems.cpp
+    UnitTests/TestRendering.cpp
 )
 
 target_link_libraries(DRXTests PRIVATE
@@ -27,6 +28,9 @@ target_link_libraries(DRXTests PRIVATE
     GTest::gtest_main
 )
 drx_set_warnings(DRXTests)
+target_compile_definitions(DRXTests PRIVATE
+    DRX_TEST_FONT_PATH="${CMAKE_SOURCE_DIR}/Engine/Assets/Fonts/Roboto-Medium.ttf"
+)
 
 target_include_directories(DRXTests PRIVATE
     ${CMAKE_SOURCE_DIR}/Engine/Source

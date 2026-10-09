@@ -1,0 +1,18 @@
+{
+    // Values for the engine sandbox; edit while running, they reload automatically
+    "camera": {
+        "fov_degrees": 90,
+        "move_speed": 6.0,
+        "fast_multiplier": 4.0,
+        "mouse_sensitivity": 0.12
+    },
+    "environment": {
+        "sun_intensity": 3.0,
+        "fog_density": 0.006,
+        "exposure": 0.85,
+        "shadows": true
+    },
+    "particles": {
+        "enabled": true
+    }
+}

@@ -9,6 +9,8 @@
 #include <cmath>
 #include <string>
 
+#include "Renderer/Public/RenderTypes.h"
+
 namespace DRX::Procedural {
 
 // ============================================================================
@@ -199,5 +201,15 @@ public:
     static Mesh CreateSandbags(float width = 2.0f);
     static Mesh CreateFence(float length = 5.0f, float height = 1.5f);
 };
+
+// ============================================================================
+// Renderer bridge
+// ============================================================================
+
+/**
+ * Converts a procedural mesh into renderer mesh data. Triangle winding is made
+ * counter-clockwise relative to the authored normals; missing normals are generated.
+ */
+Renderer::MeshData ToMeshData(const Mesh& mesh);
 
 } // namespace DRX::Procedural

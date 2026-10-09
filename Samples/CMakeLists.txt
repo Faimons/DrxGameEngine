@@ -1,5 +1,9 @@
 # DRX Engine Samples
 
+if(TARGET DRXEngine)
+    add_subdirectory(Sandbox)
+endif()
+
 # Check if GLFW and OpenGL are available
 find_package(OpenGL QUIET)
 

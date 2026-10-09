@@ -150,10 +150,11 @@ enum class InputActionType : uint32 {
 struct InputBinding {
     enum class Type { Keyboard, MouseButton, MouseAxis, GamepadButton, GamepadAxis };
 
-    Type type;
-    int32 code;           // KeyCode, MouseButton, GamepadButton, or axis index
-    float32 scale = 1.0f; // For axis scaling/inversion
+    Type type = Type::Keyboard;
+    int32 code = 0;           // KeyCode, MouseButton, GamepadButton, or axis index
+    float32 scale = 1.0f;     // For axis scaling/inversion
     float32 deadzone = 0.1f;
+    int32 component = 0;      // Axis2D: 0 = x, 1 = y
 };
 
 /**
@@ -202,7 +203,9 @@ public:
 
     bool Initialize(GLFWwindow* window);
     void Shutdown();
-    void Update();  // Call at start of frame
+    // Frame order: BeginFrame() -> Window::PollEvents() -> Update()
+    void BeginFrame();
+    void Update();
 
     // Keyboard
     bool IsKeyDown(KeyCode key) const;
@@ -240,10 +243,12 @@ public:
     // Input actions (binding system)
     void RegisterAction(const String& name, InputActionType type);
     void BindKey(const String& action, KeyCode key);
+    // Key contributes `scale` to an Axis or to an Axis2D component while held
+    void BindKeyAxis(const String& action, KeyCode key, float32 scale, int32 component = 0);
     void BindMouseButton(const String& action, MouseButton button);
-    void BindMouseAxis(const String& action, bool horizontal);
+    void BindMouseAxis(const String& action, bool horizontal, float32 scale = 1.0f, int32 component = 0);
     void BindGamepadButton(const String& action, GamepadButton button);
-    void BindGamepadAxis(const String& action, GamepadAxis axis, float32 scale = 1.0f);
+    void BindGamepadAxis(const String& action, GamepadAxis axis, float32 scale = 1.0f, int32 component = 0);
 
     bool GetAction(const String& name) const;
     bool GetActionPressed(const String& name) const;
@@ -275,8 +280,7 @@ private:
     InputSystem(const InputSystem&) = delete;
     InputSystem& operator=(const InputSystem&) = delete;
 
-    void UpdateKeyboard();
-    void UpdateMouse();
+    InputBinding* AddBinding(const String& action, InputBinding::Type type, int32 code);
     void UpdateGamepads();
     void UpdateActions();
 
@@ -300,11 +304,12 @@ private:
     bool mouse_buttons_[static_cast<int32>(MouseButton::MaxButtons)] = {};
     bool mouse_buttons_prev_[static_cast<int32>(MouseButton::MaxButtons)] = {};
     Math::Vector2 mouse_position_;
-    Math::Vector2 mouse_position_prev_;
+    Math::Vector2 mouse_delta_;
+    Math::Vector2 last_cursor_position_;
     Math::Vector2 mouse_scroll_;
     bool cursor_visible_ = true;
     bool cursor_locked_ = false;
-    bool first_mouse_update_ = true;
+    bool has_cursor_position_ = false;
 
     // Gamepad state
     static constexpr int32 MAX_GAMEPADS = 4;
@@ -327,6 +332,15 @@ private:
     String text_input_buffer_;
 
     bool initialized_ = false;
+
+    // Previously installed GLFW callbacks (e.g. the Window's) are chained, not replaced
+    struct PreviousCallbacks {
+        void (*key)(GLFWwindow*, int, int, int, int) = nullptr;
+        void (*mouse_button)(GLFWwindow*, int, int, int) = nullptr;
+        void (*cursor_pos)(GLFWwindow*, double, double) = nullptr;
+        void (*scroll)(GLFWwindow*, double, double) = nullptr;
+        void (*character)(GLFWwindow*, unsigned int) = nullptr;
+    } previous_;
 };
 
 } // namespace DRX::Input

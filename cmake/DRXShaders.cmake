@@ -15,6 +15,10 @@ endif()
 # Each shader `name.ext` becomes "Shaders/name.ext.h" with the array `kShader_name_ext`.
 function(drx_embed_shaders target)
     set(output_dir ${CMAKE_BINARY_DIR}/generated/Shaders)
+    # Shared GLSL include files: any change recompiles all shaders of this target
+    list(GET ARGN 0 first_shader)
+    get_filename_component(shader_dir ${first_shader} DIRECTORY)
+    file(GLOB DRX_SHADER_INCLUDES ${shader_dir}/*.glsl)
     file(MAKE_DIRECTORY ${output_dir})
 
     set(generated_headers)
@@ -26,7 +30,7 @@ function(drx_embed_shaders target)
         add_custom_command(
             OUTPUT ${header}
             COMMAND ${DRX_GLSLANG_VALIDATOR} -V --target-env vulkan1.2 --vn kShader_${symbol} -o ${header} ${shader}
-            DEPENDS ${shader}
+            DEPENDS ${shader} ${DRX_SHADER_INCLUDES}
             COMMENT "Compiling shader ${shader_name}"
             VERBATIM
         )
@@ -59,4 +63,25 @@ function(drx_compile_shader_assets target output_subdir)
     endforeach()
 
     add_custom_target(${target} ALL DEPENDS ${spirv_files})
+endfunction()
+
+# Embeds a binary file as "Embedded/<name>.h" exposing `symbol` and `symbol_size`
+function(drx_embed_file target input symbol)
+    set(output_dir ${CMAKE_BINARY_DIR}/generated/Embedded)
+    file(MAKE_DIRECTORY ${output_dir})
+    get_filename_component(file_name ${input} NAME)
+    set(header ${output_dir}/${file_name}.h)
+
+    add_custom_command(
+        OUTPUT ${header}
+        COMMAND ${CMAKE_COMMAND} -DINPUT=${input} -DOUTPUT=${header} -DSYMBOL=${symbol}
+                -P ${CMAKE_SOURCE_DIR}/cmake/DRXEmbedFile.cmake
+        DEPENDS ${input} ${CMAKE_SOURCE_DIR}/cmake/DRXEmbedFile.cmake
+        COMMENT "Embedding ${file_name}"
+        VERBATIM
+    )
+
+    add_custom_target(${target}_embed_${symbol} DEPENDS ${header})
+    add_dependencies(${target} ${target}_embed_${symbol})
+    target_include_directories(${target} PRIVATE ${CMAKE_BINARY_DIR}/generated)
 endfunction()

@@ -373,12 +373,12 @@ void UIContext::DrawCircle(const Math::Vector2& center, float32 radius, const Ma
     Emit(std::move(cmd));
 }
 
-void UIContext::DrawImage(const Rect& rect, SharedPtr<Renderer::Texture> texture, const Math::Vector4& tint) {
+void UIContext::DrawImage(const Rect& rect, TextureHandle texture, const Math::Vector4& tint) {
     DrawCommand cmd;
     cmd.type = DrawCommandType::Image;
     cmd.rect = rect;
     cmd.color = tint;
-    cmd.texture = std::move(texture);
+    cmd.texture = texture;
     Emit(std::move(cmd));
 }
 
@@ -709,9 +709,9 @@ bool UIContext::Combo(const String& label, int32& current_item, const Array<Stri
     return changed;
 }
 
-void UIContext::Image(SharedPtr<Renderer::Texture> texture, const Math::Vector2& size) {
+void UIContext::Image(TextureHandle texture, const Math::Vector2& size) {
     const Rect rect = {cursor_x_, cursor_y_, size.x, size.y};
-    DrawImage(rect, std::move(texture));
+    DrawImage(rect, texture);
     AddItem(rect);
 }
 

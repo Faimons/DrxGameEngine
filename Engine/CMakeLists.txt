@@ -19,6 +19,7 @@ set(DRX_ENGINE_MODULES
     Debug
     Network
     Game
+    Runtime
 )
 
 set(ENGINE_SOURCES)
@@ -81,10 +82,23 @@ if(DRX_ENABLE_VALIDATION)
 endif()
 
 # Engine-internal shaders are compiled to SPIR-V and embedded
+set(DRX_ENGINE_SHADER_DIR ${CMAKE_CURRENT_SOURCE_DIR}/Shaders)
 drx_embed_shaders(DRXEngine
-    ${CMAKE_CURRENT_SOURCE_DIR}/Shaders/forward_basic.vert
-    ${CMAKE_CURRENT_SOURCE_DIR}/Shaders/forward_basic.frag
+    ${DRX_ENGINE_SHADER_DIR}/lit.vert
+    ${DRX_ENGINE_SHADER_DIR}/lit.frag
+    ${DRX_ENGINE_SHADER_DIR}/shadow.vert
+    ${DRX_ENGINE_SHADER_DIR}/sky.vert
+    ${DRX_ENGINE_SHADER_DIR}/sky.frag
+    ${DRX_ENGINE_SHADER_DIR}/particle.vert
+    ${DRX_ENGINE_SHADER_DIR}/particle.frag
+    ${DRX_ENGINE_SHADER_DIR}/line.vert
+    ${DRX_ENGINE_SHADER_DIR}/line.frag
+    ${DRX_ENGINE_SHADER_DIR}/ui.vert
+    ${DRX_ENGINE_SHADER_DIR}/ui.frag
 )
+
+# Built-in UI font
+drx_embed_file(DRXEngine ${CMAKE_CURRENT_SOURCE_DIR}/Assets/Fonts/Roboto-Medium.ttf kFontRoboto)
 
 # Asset shaders are validated at build time and shipped as .spv
 file(GLOB DRX_ASSET_SHADERS CONFIGURE_DEPENDS

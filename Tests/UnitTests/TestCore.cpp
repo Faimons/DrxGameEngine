@@ -4,6 +4,9 @@
 
 #include <gtest/gtest.h>
 #include "Core/Public/CoreTypes.h"
+#include "Core/Public/Config.h"
+
+#include <cstdio>
 
 using namespace DRX;
 
@@ -134,4 +137,69 @@ TEST(ContainerTest, Optional) {
     EXPECT_FALSE(empty.has_value());
     EXPECT_TRUE(value.has_value());
     EXPECT_EQ(value.value(), 42);
+}
+
+// ============================================================================
+// Config Tests
+// ============================================================================
+
+
+TEST(ConfigTest, ParsesNestedValuesWithCommentsAndTrailingCommas) {
+    Config config;
+    ASSERT_TRUE(config.LoadFromString(R"({
+        // comment
+        "player": { "walk_speed": 5.5, "max_health": 100, "name": "Runner", },
+        "debug": true,
+    })"));
+    EXPECT_FLOAT_EQ(config.GetFloat("player.walk_speed", 0.0f), 5.5f);
+    EXPECT_EQ(config.GetInt("player.max_health", 0), 100);
+    EXPECT_EQ(config.GetString("player.name", ""), "Runner");
+    EXPECT_TRUE(config.GetBool("debug", false));
+    EXPECT_EQ(config.GetCount(), 4u);
+}
+
+TEST(ConfigTest, MissingOrMistypedKeysReturnDefault) {
+    Config config;
+    ASSERT_TRUE(config.LoadFromString(R"({"a": "text", "b": 2})"));
+    EXPECT_EQ(config.GetInt("missing", 7), 7);
+    EXPECT_EQ(config.GetInt("a", 3), 3);
+    EXPECT_FALSE(config.GetBool("b", false));
+    EXPECT_FALSE(config.Has("missing"));
+}
+
+TEST(ConfigTest, InvalidJsonKeepsPreviousValues) {
+    Config config;
+    ASSERT_TRUE(config.LoadFromString(R"({"x": 1})"));
+    EXPECT_FALSE(config.LoadFromString(R"({"x": )"));
+    EXPECT_FALSE(config.LoadFromString(R"({"x": [1, 2]})"));
+    EXPECT_EQ(config.GetInt("x", 0), 1);
+}
+
+TEST(ConfigTest, OverridesSurviveReload) {
+    Config config;
+    config.AddOverride("speed", "9.5");
+    config.AddOverride("enabled", "false");
+    config.AddOverride("mode", "duel");
+    ASSERT_TRUE(config.LoadFromString(R"({"speed": 1, "enabled": true, "other": 3})"));
+    EXPECT_FLOAT_EQ(config.GetFloat("speed", 0.0f), 9.5f);
+    EXPECT_FALSE(config.GetBool("enabled", true));
+    EXPECT_EQ(config.GetString("mode", ""), "duel");
+    EXPECT_EQ(config.GetInt("other", 0), 3);
+}
+
+TEST(ConfigTest, ReloadCallbackAndSaveRoundTrip) {
+    Config config;
+    int reloads = 0;
+    config.SetReloadCallback([&](const Config&) { ++reloads; });
+    ASSERT_TRUE(config.LoadFromString(R"({"a": {"b": 2.5, "c": "x"}, "d": false})"));
+    EXPECT_EQ(reloads, 1);
+
+    const String path = testing::TempDir() + "drx_config_roundtrip.json";
+    ASSERT_TRUE(config.SaveToFile(path));
+    Config loaded;
+    ASSERT_TRUE(loaded.LoadFromFile(path));
+    EXPECT_FLOAT_EQ(loaded.GetFloat("a.b", 0.0f), 2.5f);
+    EXPECT_EQ(loaded.GetString("a.c", ""), "x");
+    EXPECT_FALSE(loaded.GetBool("d", true));
+    std::remove(path.c_str());
 }

@@ -1521,4 +1521,52 @@ Mesh EnvironmentFactory::CreateFence(float length, float height) {
     return mesh;
 }
 
+// ============================================================================
+// Renderer bridge
+// ============================================================================
+
+Renderer::MeshData ToMeshData(const Mesh& mesh) {
+    Renderer::MeshData data;
+    data.vertices.reserve(mesh.vertices.size());
+
+    bool has_normals = false;
+    for (const auto& v : mesh.vertices) {
+        Renderer::Vertex out;
+        out.position = Math::Vector3(v.x, v.y, v.z);
+        out.normal = Math::Vector3(v.nx, v.ny, v.nz);
+        out.color = Math::Vector3(v.r, v.g, v.b);
+        out.tex_coord = Math::Vector2(v.u, v.v);
+        has_normals |= out.normal.LengthSquared() > 1e-8f;
+        data.vertices.push_back(out);
+    }
+
+    const size_t vertex_count = data.vertices.size();
+    data.indices.reserve(mesh.indices.size());
+    for (size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
+        uint32 a = mesh.indices[i];
+        uint32 b = mesh.indices[i + 1];
+        uint32 c = mesh.indices[i + 2];
+        if (a >= vertex_count || b >= vertex_count || c >= vertex_count) continue;
+
+        if (has_normals) {
+            const Math::Vector3 face = Math::Vector3::Cross(data.vertices[b].position - data.vertices[a].position,
+                                                            data.vertices[c].position - data.vertices[a].position);
+            const Math::Vector3 authored = data.vertices[a].normal + data.vertices[b].normal + data.vertices[c].normal;
+            if (Math::Vector3::Dot(face, authored) < 0.0f) {
+                std::swap(b, c);
+            }
+        }
+        data.indices.insert(data.indices.end(), {a, b, c});
+    }
+
+    if (!has_normals) {
+        data.ComputeNormals();
+    } else {
+        for (auto& v : data.vertices) {
+            v.normal = v.normal.LengthSquared() > 1e-8f ? v.normal.Normalized() : Math::Vector3::Up;
+        }
+    }
+    return data;
+}
+
 } // namespace DRX::Procedural

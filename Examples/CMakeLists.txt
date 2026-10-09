@@ -1,12 +1,2 @@
 # DRX Engine Examples
-
-# Triangle Demo
-add_executable(DRXTriangleDemo
-    ${CMAKE_SOURCE_DIR}/Engine/Source/Main.cpp
-)
-
-target_link_libraries(DRXTriangleDemo PRIVATE DRXEngine)
-drx_set_warnings(DRXTriangleDemo)
-
-# Install
-install(TARGETS DRXTriangleDemo RUNTIME DESTINATION bin)
+# Data-only templates live here; runnable samples are in Samples/

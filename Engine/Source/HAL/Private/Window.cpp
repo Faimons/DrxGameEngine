@@ -249,8 +249,9 @@ void Window::GLFWCursorPosCallback(GLFWwindow* window, double xpos, double ypos)
             self->first_mouse_ = false;
         }
 
-        self->mouse_delta_x_ = xpos - self->last_mouse_x_;
-        self->mouse_delta_y_ = ypos - self->last_mouse_y_;
+        // Accumulate: several cursor events can arrive within one PollEvents()
+        self->mouse_delta_x_ += xpos - self->last_mouse_x_;
+        self->mouse_delta_y_ += ypos - self->last_mouse_y_;
         self->last_mouse_x_ = xpos;
         self->last_mouse_y_ = ypos;
 

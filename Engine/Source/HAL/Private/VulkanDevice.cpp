@@ -10,9 +10,10 @@
 #endif
 #include <GLFW/glfw3.h>
 
-#include <set>
 #include <algorithm>
+#include <cstring>
 #include <limits>
+#include <set>
 
 namespace DRX::HAL {
 
@@ -58,6 +59,27 @@ namespace {
         return VK_ERROR_EXTENSION_NOT_PRESENT;
     }
 
+    bool IsInstanceLayerAvailable(const char* name) {
+        uint32 count = 0;
+        vkEnumerateInstanceLayerProperties(&count, nullptr);
+        Array<VkLayerProperties> layers(count);
+        vkEnumerateInstanceLayerProperties(&count, layers.data());
+        return std::any_of(layers.begin(), layers.end(),
+            [name](const VkLayerProperties& layer) { return std::strcmp(layer.layerName, name) == 0; });
+    }
+
+    int32 ScoreDevice(VkPhysicalDevice device) {
+        VkPhysicalDeviceProperties properties;
+        vkGetPhysicalDeviceProperties(device, &properties);
+        switch (properties.deviceType) {
+            case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU:   return 1000;
+            case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return 500;
+            case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU:    return 200;
+            case VK_PHYSICAL_DEVICE_TYPE_CPU:            return 50;
+            default:                                     return 10;
+        }
+    }
+
     void DestroyDebugUtilsMessengerEXT(
         VkInstance instance,
         VkDebugUtilsMessengerEXT debugMessenger,
@@ -78,9 +100,19 @@ GraphicsDevice::~GraphicsDevice() {
 }
 
 bool GraphicsDevice::Initialize(Window* window, const GraphicsConfig& config) {
+    if (!window || !window->GetNativeHandle()) {
+        DRX_LOG_ERROR("GraphicsDevice requires a created window");
+        return false;
+    }
+
     window_ = window;
     config_ = config;
-    max_frames_in_flight_ = config.max_frames_in_flight;
+    max_frames_in_flight_ = std::max(1u, config.max_frames_in_flight);
+
+    if (config_.enable_validation && !IsInstanceLayerAvailable(kValidationLayers[0])) {
+        DRX_LOG_WARNING("Vulkan validation layers requested but not installed - continuing without them");
+        config_.enable_validation = false;
+    }
 
     if (!CreateInstance()) return false;
     if (config_.enable_validation && !SetupDebugMessenger()) return false;
@@ -98,32 +130,47 @@ bool GraphicsDevice::Initialize(Window* window, const GraphicsConfig& config) {
 }
 
 void GraphicsDevice::Shutdown() {
+    if (instance_ == VK_NULL_HANDLE) {
+        return;  // never initialized or already shut down
+    }
+
     if (device_ != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device_);
 
         CleanupSwapChain();
 
-        for (size_t i = 0; i < max_frames_in_flight_; ++i) {
-            vkDestroySemaphore(device_, render_finished_semaphores_[i], nullptr);
-            vkDestroySemaphore(device_, image_available_semaphores_[i], nullptr);
-            vkDestroyFence(device_, in_flight_fences_[i], nullptr);
+        for (auto semaphore : image_available_semaphores_) {
+            if (semaphore != VK_NULL_HANDLE) vkDestroySemaphore(device_, semaphore, nullptr);
         }
+        for (auto fence : in_flight_fences_) {
+            if (fence != VK_NULL_HANDLE) vkDestroyFence(device_, fence, nullptr);
+        }
+        image_available_semaphores_.clear();
+        in_flight_fences_.clear();
+        command_buffers_.clear();
 
-        vkDestroyCommandPool(device_, command_pool_, nullptr);
+        if (command_pool_ != VK_NULL_HANDLE) {
+            vkDestroyCommandPool(device_, command_pool_, nullptr);
+            command_pool_ = VK_NULL_HANDLE;
+        }
         vkDestroyDevice(device_, nullptr);
+        device_ = VK_NULL_HANDLE;
     }
 
     if (debug_messenger_ != VK_NULL_HANDLE) {
         DestroyDebugUtilsMessengerEXT(instance_, debug_messenger_, nullptr);
+        debug_messenger_ = VK_NULL_HANDLE;
     }
 
     if (surface_ != VK_NULL_HANDLE) {
         vkDestroySurfaceKHR(instance_, surface_, nullptr);
+        surface_ = VK_NULL_HANDLE;
     }
 
-    if (instance_ != VK_NULL_HANDLE) {
-        vkDestroyInstance(instance_, nullptr);
-    }
+    vkDestroyInstance(instance_, nullptr);
+    instance_ = VK_NULL_HANDLE;
+    physical_device_ = VK_NULL_HANDLE;
+    current_frame_ = 0;
 
     DRX_LOG_INFO("Vulkan graphics device shutdown");
 }
@@ -156,7 +203,6 @@ bool GraphicsDevice::CreateInstance() {
 
         debug_create_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
         debug_create_info.messageSeverity =
-            VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
             VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
             VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
         debug_create_info.messageType =
@@ -184,7 +230,6 @@ bool GraphicsDevice::SetupDebugMessenger() {
     VkDebugUtilsMessengerCreateInfoEXT create_info{};
     create_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
     create_info.messageSeverity =
-        VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT |
         VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
         VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
     create_info.messageType =
@@ -222,10 +267,13 @@ bool GraphicsDevice::PickPhysicalDevice() {
     Array<VkPhysicalDevice> devices(device_count);
     vkEnumeratePhysicalDevices(instance_, &device_count, devices.data());
 
+    int32 best_score = -1;
     for (const auto& device : devices) {
-        if (IsDeviceSuitable(device)) {
+        if (!IsDeviceSuitable(device)) continue;
+        const int32 score = ScoreDevice(device);
+        if (score > best_score) {
+            best_score = score;
             physical_device_ = device;
-            break;
         }
     }
 
@@ -349,9 +397,19 @@ bool GraphicsDevice::CreateLogicalDevice() {
         queue_create_infos.push_back(queue_info);
     }
 
+    VkPhysicalDeviceFeatures supported{};
+    vkGetPhysicalDeviceFeatures(physical_device_, &supported);
+
     VkPhysicalDeviceFeatures device_features{};
-    device_features.samplerAnisotropy = VK_TRUE;
-    device_features.fillModeNonSolid = VK_TRUE;
+    device_features.samplerAnisotropy = supported.samplerAnisotropy;
+    device_features.fillModeNonSolid = supported.fillModeNonSolid;
+
+    anisotropy_enabled_ = supported.samplerAnisotropy == VK_TRUE;
+    if (anisotropy_enabled_) {
+        VkPhysicalDeviceProperties properties;
+        vkGetPhysicalDeviceProperties(physical_device_, &properties);
+        max_anisotropy_ = properties.limits.maxSamplerAnisotropy;
+    }
 
     VkDeviceCreateInfo create_info{};
     create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -413,9 +471,13 @@ VkExtent2D GraphicsDevice::ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& capa
         return capabilities.currentExtent;
     }
 
+    // Framebuffer size (pixels) differs from window size on HiDPI displays
+    int fb_width = 0;
+    int fb_height = 0;
+    glfwGetFramebufferSize(window_->GetNativeHandle(), &fb_width, &fb_height);
     VkExtent2D extent = {
-        window_->GetWidth(),
-        window_->GetHeight()
+        static_cast<uint32>(std::max(fb_width, 1)),
+        static_cast<uint32>(std::max(fb_height, 1))
     };
 
     extent.width = std::clamp(extent.width,
@@ -431,6 +493,10 @@ VkExtent2D GraphicsDevice::ChooseSwapExtent(const VkSurfaceCapabilitiesKHR& capa
 bool GraphicsDevice::CreateSwapChain() {
     SwapChainSupportDetails support = QuerySwapChainSupport(physical_device_);
 
+    if (support.formats.empty() || support.present_modes.empty()) {
+        DRX_LOG_ERROR("Surface reports no formats or present modes");
+        return false;
+    }
     VkSurfaceFormatKHR surface_format = ChooseSwapSurfaceFormat(support.formats);
     VkPresentModeKHR present_mode = ChooseSwapPresentMode(support.present_modes);
     VkExtent2D extent = ChooseSwapExtent(support.capabilities);
@@ -449,6 +515,11 @@ bool GraphicsDevice::CreateSwapChain() {
     create_info.imageExtent = extent;
     create_info.imageArrayLayers = 1;
     create_info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    // Allows copying the presented image (screenshots, automated visual tests)
+    swap_chain_supports_copy_ = (support.capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
+    if (swap_chain_supports_copy_) {
+        create_info.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    }
 
     uint32 queue_family_indices[] = {
         queue_families_.graphics_family.value(),
@@ -487,6 +558,18 @@ bool GraphicsDevice::CreateSwapChain() {
 
 bool GraphicsDevice::CreateImageViews() {
     swap_chain_image_views_.resize(swap_chain_images_.size());
+
+    // One "render finished" semaphore per swap chain image: the presentation engine
+    // may still hold the previous one when the same frame-in-flight slot comes around
+    VkSemaphoreCreateInfo semaphore_info{};
+    semaphore_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    render_finished_semaphores_.assign(swap_chain_images_.size(), VK_NULL_HANDLE);
+    for (auto& semaphore : render_finished_semaphores_) {
+        if (vkCreateSemaphore(device_, &semaphore_info, nullptr, &semaphore) != VK_SUCCESS) {
+            DRX_LOG_ERROR("Failed to create render-finished semaphore");
+            return false;
+        }
+    }
 
     for (size_t i = 0; i < swap_chain_images_.size(); ++i) {
         VkImageViewCreateInfo create_info{};
@@ -546,7 +629,6 @@ bool GraphicsDevice::CreateCommandBuffers() {
 
 bool GraphicsDevice::CreateSyncObjects() {
     image_available_semaphores_.resize(max_frames_in_flight_);
-    render_finished_semaphores_.resize(max_frames_in_flight_);
     in_flight_fences_.resize(max_frames_in_flight_);
 
     VkSemaphoreCreateInfo semaphore_info{};
@@ -558,7 +640,6 @@ bool GraphicsDevice::CreateSyncObjects() {
 
     for (size_t i = 0; i < max_frames_in_flight_; ++i) {
         if (vkCreateSemaphore(device_, &semaphore_info, nullptr, &image_available_semaphores_[i]) != VK_SUCCESS ||
-            vkCreateSemaphore(device_, &semaphore_info, nullptr, &render_finished_semaphores_[i]) != VK_SUCCESS ||
             vkCreateFence(device_, &fence_info, nullptr, &in_flight_fences_[i]) != VK_SUCCESS) {
             DRX_LOG_ERROR("Failed to create sync objects");
             return false;
@@ -570,9 +651,14 @@ bool GraphicsDevice::CreateSyncObjects() {
 
 void GraphicsDevice::CleanupSwapChain() {
     for (auto view : swap_chain_image_views_) {
-        vkDestroyImageView(device_, view, nullptr);
+        if (view != VK_NULL_HANDLE) vkDestroyImageView(device_, view, nullptr);
     }
     swap_chain_image_views_.clear();
+
+    for (auto semaphore : render_finished_semaphores_) {
+        if (semaphore != VK_NULL_HANDLE) vkDestroySemaphore(device_, semaphore, nullptr);
+    }
+    render_finished_semaphores_.clear();
 
     if (swap_chain_ != VK_NULL_HANDLE) {
         vkDestroySwapchainKHR(device_, swap_chain_, nullptr);
@@ -581,23 +667,57 @@ void GraphicsDevice::CleanupSwapChain() {
 }
 
 void GraphicsDevice::RecreateSwapChain() {
-    int width = 0, height = 0;
-    while (width == 0 || height == 0) {
-        width = window_->GetWidth();
-        height = window_->GetHeight();
+    // Wait while minimized (zero-sized framebuffer cannot have a swap chain)
+    int width = 0;
+    int height = 0;
+    glfwGetFramebufferSize(window_->GetNativeHandle(), &width, &height);
+    while ((width == 0 || height == 0) && !glfwWindowShouldClose(window_->GetNativeHandle())) {
         glfwWaitEvents();
+        glfwGetFramebufferSize(window_->GetNativeHandle(), &width, &height);
+    }
+    if (width == 0 || height == 0) {
+        return;
     }
 
     vkDeviceWaitIdle(device_);
 
     CleanupSwapChain();
 
-    CreateSwapChain();
-    CreateImageViews();
+    if (!CreateSwapChain() || !CreateImageViews()) {
+        DRX_LOG_FATAL("Failed to recreate swap chain");
+        return;
+    }
     ++swap_chain_generation_;
 }
 
+VkFormat GraphicsDevice::FindDepthFormat(bool sampled) const {
+    const VkFormat candidates[] = {
+        VK_FORMAT_D32_SFLOAT,
+        VK_FORMAT_D32_SFLOAT_S8_UINT,
+        VK_FORMAT_D24_UNORM_S8_UINT,
+        VK_FORMAT_D16_UNORM
+    };
+
+    VkFormatFeatureFlags required = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    if (sampled) {
+        required |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT;
+    }
+
+    for (VkFormat format : candidates) {
+        VkFormatProperties properties;
+        vkGetPhysicalDeviceFormatProperties(physical_device_, format, &properties);
+        if ((properties.optimalTilingFeatures & required) == required) {
+            return format;
+        }
+    }
+    return VK_FORMAT_UNDEFINED;
+}
+
 bool GraphicsDevice::BeginFrame() {
+    if (device_ == VK_NULL_HANDLE || swap_chain_ == VK_NULL_HANDLE) {
+        return false;
+    }
+
     vkWaitForFences(device_, 1, &in_flight_fences_[current_frame_], VK_TRUE, UINT64_MAX);
 
     VkResult result = vkAcquireNextImageKHR(
@@ -635,7 +755,7 @@ void GraphicsDevice::EndFrame() {
     submit_info.commandBufferCount = 1;
     submit_info.pCommandBuffers = &command_buffers_[current_frame_];
 
-    VkSemaphore signal_semaphores[] = {render_finished_semaphores_[current_frame_]};
+    VkSemaphore signal_semaphores[] = {render_finished_semaphores_[current_image_index_]};
     submit_info.signalSemaphoreCount = 1;
     submit_info.pSignalSemaphores = signal_semaphores;
 
@@ -714,7 +834,178 @@ uint32 GraphicsDevice::FindMemoryType(uint32 type_filter, VkMemoryPropertyFlags 
     }
 
     DRX_LOG_ERROR("Failed to find suitable memory type");
-    return 0;
+    return std::numeric_limits<uint32>::max();
+}
+
+} // namespace DRX::HAL
+
+namespace DRX::HAL {
+
+bool GraphicsDevice::CreateBuffer(VkDeviceSize size, VkBufferUsageFlags usage, VkMemoryPropertyFlags properties,
+                                  VkBuffer& buffer, VkDeviceMemory& memory) {
+    buffer = VK_NULL_HANDLE;
+    memory = VK_NULL_HANDLE;
+    if (size == 0) {
+        DRX_LOG_ERROR("Refusing to create an empty buffer");
+        return false;
+    }
+
+    VkBufferCreateInfo buffer_info{};
+    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buffer_info.size = size;
+    buffer_info.usage = usage;
+    buffer_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+    if (vkCreateBuffer(device_, &buffer_info, nullptr, &buffer) != VK_SUCCESS) {
+        buffer = VK_NULL_HANDLE;
+        DRX_LOG_ERROR("vkCreateBuffer failed ({} bytes)", size);
+        return false;
+    }
+
+    VkMemoryRequirements requirements;
+    vkGetBufferMemoryRequirements(device_, buffer, &requirements);
+
+    const uint32 type = FindMemoryType(requirements.memoryTypeBits, properties);
+    VkMemoryAllocateInfo alloc_info{};
+    alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    alloc_info.allocationSize = requirements.size;
+    alloc_info.memoryTypeIndex = type;
+
+    if (type == std::numeric_limits<uint32>::max() ||
+        vkAllocateMemory(device_, &alloc_info, nullptr, &memory) != VK_SUCCESS ||
+        vkBindBufferMemory(device_, buffer, memory, 0) != VK_SUCCESS) {
+        DRX_LOG_ERROR("Failed to allocate buffer memory ({} bytes)", requirements.size);
+        DestroyBuffer(buffer, memory);
+        return false;
+    }
+    return true;
+}
+
+bool GraphicsDevice::CreateImage(const VkImageCreateInfo& info, VkMemoryPropertyFlags properties,
+                                 VkImage& image, VkDeviceMemory& memory) {
+    image = VK_NULL_HANDLE;
+    memory = VK_NULL_HANDLE;
+
+    if (vkCreateImage(device_, &info, nullptr, &image) != VK_SUCCESS) {
+        image = VK_NULL_HANDLE;
+        DRX_LOG_ERROR("vkCreateImage failed ({}x{})", info.extent.width, info.extent.height);
+        return false;
+    }
+
+    VkMemoryRequirements requirements;
+    vkGetImageMemoryRequirements(device_, image, &requirements);
+
+    const uint32 type = FindMemoryType(requirements.memoryTypeBits, properties);
+    VkMemoryAllocateInfo alloc_info{};
+    alloc_info.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO;
+    alloc_info.allocationSize = requirements.size;
+    alloc_info.memoryTypeIndex = type;
+
+    if (type == std::numeric_limits<uint32>::max() ||
+        vkAllocateMemory(device_, &alloc_info, nullptr, &memory) != VK_SUCCESS ||
+        vkBindImageMemory(device_, image, memory, 0) != VK_SUCCESS) {
+        DRX_LOG_ERROR("Failed to allocate image memory ({} bytes)", requirements.size);
+        DestroyImage(image, memory);
+        return false;
+    }
+    return true;
+}
+
+void GraphicsDevice::DestroyBuffer(VkBuffer& buffer, VkDeviceMemory& memory) {
+    if (buffer != VK_NULL_HANDLE) vkDestroyBuffer(device_, buffer, nullptr);
+    if (memory != VK_NULL_HANDLE) vkFreeMemory(device_, memory, nullptr);
+    buffer = VK_NULL_HANDLE;
+    memory = VK_NULL_HANDLE;
+}
+
+void GraphicsDevice::DestroyImage(VkImage& image, VkDeviceMemory& memory) {
+    if (image != VK_NULL_HANDLE) vkDestroyImage(device_, image, nullptr);
+    if (memory != VK_NULL_HANDLE) vkFreeMemory(device_, memory, nullptr);
+    image = VK_NULL_HANDLE;
+    memory = VK_NULL_HANDLE;
+}
+
+bool GraphicsDevice::UploadBuffer(VkBuffer destination, const void* data, VkDeviceSize size) {
+    if (destination == VK_NULL_HANDLE || !data || size == 0) return false;
+
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory staging_memory = VK_NULL_HANDLE;
+    if (!CreateBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                      staging, staging_memory)) {
+        return false;
+    }
+
+    void* mapped = nullptr;
+    if (vkMapMemory(device_, staging_memory, 0, size, 0, &mapped) != VK_SUCCESS) {
+        DestroyBuffer(staging, staging_memory);
+        return false;
+    }
+    std::memcpy(mapped, data, static_cast<size_t>(size));
+    vkUnmapMemory(device_, staging_memory);
+
+    VkCommandBuffer cmd = BeginSingleTimeCommands();
+    VkBufferCopy region{};
+    region.size = size;
+    vkCmdCopyBuffer(cmd, staging, destination, 1, &region);
+    EndSingleTimeCommands(cmd);
+
+    DestroyBuffer(staging, staging_memory);
+    return true;
+}
+
+bool GraphicsDevice::UploadImage(VkImage destination, uint32 width, uint32 height, const void* data,
+                                 VkDeviceSize size, uint32 mip_levels) {
+    if (destination == VK_NULL_HANDLE || !data || size == 0) return false;
+
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory staging_memory = VK_NULL_HANDLE;
+    if (!CreateBuffer(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                      staging, staging_memory)) {
+        return false;
+    }
+
+    void* mapped = nullptr;
+    if (vkMapMemory(device_, staging_memory, 0, size, 0, &mapped) != VK_SUCCESS) {
+        DestroyBuffer(staging, staging_memory);
+        return false;
+    }
+    std::memcpy(mapped, data, static_cast<size_t>(size));
+    vkUnmapMemory(device_, staging_memory);
+
+    VkCommandBuffer cmd = BeginSingleTimeCommands();
+
+    VkImageMemoryBarrier barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = destination;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.levelCount = mip_levels;
+    barrier.subresourceRange.layerCount = 1;
+    barrier.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+    VkBufferImageCopy region{};
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent = {width, height, 1};
+    vkCmdCopyBufferToImage(cmd, staging, destination, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+
+    barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    barrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         0, 0, nullptr, 0, nullptr, 1, &barrier);
+
+    EndSingleTimeCommands(cmd);
+    DestroyBuffer(staging, staging_memory);
+    return true;
 }
 
 } // namespace DRX::HAL
