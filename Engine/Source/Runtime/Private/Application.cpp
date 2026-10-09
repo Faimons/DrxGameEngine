@@ -51,6 +51,11 @@ Application::~Application() {
     ShutdownSystems();
 }
 
+void Application::SetFixedTimestep(float32 seconds) {
+    config_.fixed_timestep = std::clamp(seconds, 0.001f, 0.2f);
+    accumulator_ = 0.0;
+}
+
 float32 Application::GetAspectRatio() const {
     if (!device_) return 16.0f / 9.0f;
     const VkExtent2D extent = device_->GetSwapChainExtent();

@@ -259,6 +259,9 @@ public:
 
     Math::Vector3 GetPosition() const { return state_.position; }
     void SetPosition(const Math::Vector3& feet_position);
+    // Disabled characters are removed from collision and queries (e.g. dead players)
+    void SetEnabled(bool enabled);
+    bool IsEnabled() const { return enabled_; }
     Math::Vector3 GetVelocity() const { return state_.velocity; }
     void SetVelocity(const Math::Vector3& velocity) { state_.velocity = velocity; }
     bool IsGrounded() const { return state_.grounded; }
@@ -290,6 +293,7 @@ private:
     CharacterState state_;
     float32 min_ground_normal_y_ = 0.7f;
     bool crushed_ = false;
+    bool enabled_ = true;
 };
 
 class PhysicsWorld {

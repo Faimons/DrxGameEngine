@@ -1,0 +1,79 @@
+{
+    // SHIFT - all gameplay values (blueprint start values). Change numbers here, never in code.
+    // The file reloads while the game runs; values read at startup need a restart.
+
+    "player": {
+        "max_health": 100,
+        "walk_speed": 5.5,
+        "carrier_speed": 4.0,
+        "jump_height": 1.0,
+        "gravity": 20.0,
+        "air_control": 0.3,
+        "radius": 0.3,
+        "height": 1.8,
+        "eye_height": 1.65,
+        "head_height": 1.5,
+        "fov": 90,
+        "respawn_time": 8.0,
+        "spawn_protection": 2.0,
+        "core_pickup_time": 1.0,
+        "mouse_sensitivity": 0.1
+    },
+
+    "weapons": {
+        "rifle":   { "damage": 14, "headshot_multiplier": 1.5, "pellets": 1, "fire_rate": 10,  "automatic": true,
+                     "magazine": 30, "reload_time": 2.0, "range": 150, "spread": 0.6 },
+        "shotgun": { "damage": 9,  "headshot_multiplier": 1.5, "pellets": 8, "fire_rate": 1.2, "automatic": false,
+                     "magazine": 6,  "reload_time": 2.5, "range": 60, "spread": 4.0,
+                     "falloff_start": 8, "falloff_end": 20, "falloff_min": 0.3 },
+        "sniper":  { "damage": 70, "headshot_multiplier": 1.5, "pellets": 1, "fire_rate": 0.8, "automatic": false,
+                     "magazine": 5,  "reload_time": 2.8, "range": 300, "spread": 0.0, "moving_spread": 3.0, "zoom": 3.0 },
+        "pistol":  { "damage": 20, "headshot_multiplier": 1.5, "pellets": 1, "fire_rate": 5,   "automatic": false,
+                     "magazine": 12, "reload_time": 1.4, "range": 150, "spread": 0.3 }
+    },
+
+    "anchor": {
+        "speed": 40,
+        "freeze_time": 10,
+        "cooldown": 20,
+        "max_active_per_team": 2
+    },
+
+    "round": {
+        "rounds_to_win": 2,
+        "round_time": 480,
+        "freeze_time": 10,
+        "core_return_time": 20
+    },
+
+    "shifts": {
+        "interval": 30,
+        "warning_time": 5,
+        "move_duration": 4,
+        "max_speed": 1.5,
+        "crush_gap": 0.6,
+        "all_open_max_per": 6
+    },
+
+    "drones": {
+        "count": 3,
+        "health": 40,
+        "damage": 6,
+        "fire_rate": 2,
+        "speed": 3,
+        "attack_radius": 12,
+        "return_time": 5,
+        "respawn_time": 30
+    },
+
+    "net": {
+        "tick_rate": 30,
+        "port": 27015,
+        "lag_compensation_max_ms": 200,
+        "interpolation_delay_ms": 100,
+        "wall_correction_interval": 1.0,
+        "simulated_latency_ms": 0,
+        "simulated_jitter_ms": 0,
+        "simulated_loss": 0
+    }
+}

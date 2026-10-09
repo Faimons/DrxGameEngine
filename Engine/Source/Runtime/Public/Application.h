@@ -82,6 +82,8 @@ public:
     uint64 GetFrameCount() const { return frame_count_; }
     float32 GetFPS() const { return fps_; }
     float32 GetFixedTimestep() const { return config_.fixed_timestep; }
+    // e.g. from the game configuration in OnInitialize; clamped to 1/1000 .. 1/5 s
+    void SetFixedTimestep(float32 seconds);
     float32 GetInterpolationAlpha() const { return interpolation_alpha_; }   // for rendering between fixed steps
 
     // Mouse capture for first-person control

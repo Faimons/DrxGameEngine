@@ -91,6 +91,11 @@ if(Vulkan_FOUND)
         add_subdirectory(Tests)
     endif()
 
+    # Games (requires Engine)
+    if(EXISTS ${CMAKE_SOURCE_DIR}/Games/CMakeLists.txt)
+        add_subdirectory(Games)
+    endif()
+
     # Examples (requires Engine)
     if(DRX_BUILD_EXAMPLES AND EXISTS ${CMAKE_SOURCE_DIR}/Examples/CMakeLists.txt)
         add_subdirectory(Examples)

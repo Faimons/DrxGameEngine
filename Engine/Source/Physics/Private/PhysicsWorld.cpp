@@ -440,11 +440,25 @@ bool CharacterController::Create(btDiscreteDynamicsWorld* world, const Character
     // Triggers must see the character even though they never block it
     world_->addCollisionObject(object_, static_cast<int>(settings.layer),
                                static_cast<int>(settings.mask | CollisionLayer::Trigger));
+    enabled_ = true;
     return true;
 }
 
+void CharacterController::SetEnabled(bool enabled) {
+    if (!object_ || enabled == enabled_) return;
+    enabled_ = enabled;
+    if (enabled) {
+        object_->setWorldTransform(MakeTransform(GetCenter()));
+        world_->addCollisionObject(object_, static_cast<int>(settings_.layer),
+                                   static_cast<int>(settings_.mask | CollisionLayer::Trigger));
+    } else {
+        world_->removeCollisionObject(object_);
+        crushed_ = false;
+    }
+}
+
 void CharacterController::Destroy() {
-    if (world_ && object_) world_->removeCollisionObject(object_);
+    if (world_ && object_ && enabled_) world_->removeCollisionObject(object_);
     delete object_;
     delete shape_;
     object_ = nullptr;
@@ -457,7 +471,7 @@ Math::Vector3 CharacterController::GetCenter() const {
 }
 
 void CharacterController::SyncObject() {
-    if (!object_) return;
+    if (!object_ || !enabled_) return;
     object_->setWorldTransform(MakeTransform(GetCenter()));
     world_->updateSingleAabb(object_);
 }
@@ -596,18 +610,21 @@ float32 CharacterController::MoveAndSlide(const Math::Vector3& displacement) {
 }
 
 void CharacterController::Move(const Math::Vector3& wish_velocity, float32 jump_speed, float32 dt) {
-    if (!object_ || dt <= 0.0f) return;
+    if (!object_ || !enabled_ || dt <= 0.0f) return;
 
     ResolvePenetration();
 
     Math::Vector3 velocity(wish_velocity.x, state_.velocity.y, wish_velocity.z);
     bool jumped = false;
+    float32 vertical_start = 0.0f;   // vertical speed at the start of the step (airborne)
     if (state_.grounded && jump_speed > 0.0f) {
-        velocity.y = jump_speed;
+        vertical_start = jump_speed;
+        velocity.y = jump_speed - settings_.gravity * dt;
         jumped = true;
     } else if (state_.grounded) {
         velocity.y = 0.0f;
     } else {
+        vertical_start = velocity.y;
         velocity.y -= settings_.gravity * dt;
     }
 
@@ -644,7 +661,11 @@ void CharacterController::Move(const Math::Vector3& wish_velocity, float32 jump_
         grounded = ProbeGround(position, settings_.ground_snap_distance, ground_normal);
         if (grounded) velocity.y = 0.0f;
     } else {
-        position = SlideMove(position, velocity * dt, &velocity);
+        // Average vertical speed over the step: exact for constant gravity, so the jump apex does
+        // not depend on the tick rate
+        Math::Vector3 displacement = velocity * dt;
+        displacement.y = (vertical_start + velocity.y) * 0.5f * dt;
+        position = SlideMove(position, displacement, &velocity);
         if (velocity.y <= 0.0f) {
             grounded = ProbeGround(position, settings_.skin_width * 2.0f, ground_normal);
             if (grounded) velocity.y = 0.0f;
@@ -659,7 +680,7 @@ void CharacterController::Move(const Math::Vector3& wish_velocity, float32 jump_
 }
 
 bool CharacterController::ResolvePenetration() {
-    if (!object_) return true;
+    if (!object_ || !enabled_) return true;
 
     struct PenetrationCollector : btCollisionWorld::ContactResultCallback {
         const btCollisionObject* self;
