@@ -3,49 +3,45 @@
  */
 
 #include "Game/Public/FPSFramework.h"
+#include "Core/Public/Log.h"
+
 #include <algorithm>
 #include <cmath>
-#include <random>
 
 namespace DRX::Game {
+
+namespace {
+
+constexpr float32 kPi = 3.14159265358979323846f;
+constexpr float32 kDegToRad = kPi / 180.0f;
+
+Math::Vector3 Horizontal(const Math::Vector3& v) {
+    return Math::Vector3(v.x, 0.0f, v.z);
+}
+
+} // namespace
 
 // ============================================================================
 // HealthComponent
 // ============================================================================
 
-HealthComponent::HealthComponent(float32 max_health)
-    : health_(max_health), max_health_(max_health) {}
+HealthComponent::HealthComponent(float32 max_health) : health_(max_health), max_health_(max_health) {}
 
-void HealthComponent::TakeDamage(const DamageInfo& damage) {
-    if (invulnerable || IsDead()) return;
+float32 HealthComponent::TakeDamage(const DamageInfo& damage) {
+    if (invulnerable || IsDead() || damage.amount <= 0.0f) return 0.0f;
 
-    float32 actual_damage = damage.amount * damage_multiplier;
-
-    // Apply critical hit multiplier
-    if (damage.is_critical) {
-        actual_damage *= 2.0f;
-    }
-
-    health_ = std::max(0.0f, health_ - actual_damage);
-
-    if (on_damage_) {
-        on_damage_(damage);
-    }
-
-    if (IsDead() && on_death_) {
-        on_death_(damage);
-    }
+    const float32 applied = std::min(health_, damage.amount * damage_multiplier);
+    health_ -= applied;
+    if (on_damage_) on_damage_(damage);
+    if (IsDead() && on_death_) on_death_(damage);
+    return applied;
 }
 
 void HealthComponent::Heal(float32 amount) {
-    if (IsDead()) return;
-
-    float32 old_health = health_;
+    if (IsDead() || amount <= 0.0f) return;
+    const float32 old_health = health_;
     health_ = std::min(health_ + amount, max_health_);
-
-    if (on_heal_ && health_ > old_health) {
-        on_heal_(health_ - old_health);
-    }
+    if (on_heal_ && health_ > old_health) on_heal_(health_ - old_health);
 }
 
 void HealthComponent::SetHealth(float32 health) {
@@ -53,7 +49,7 @@ void HealthComponent::SetHealth(float32 health) {
 }
 
 void HealthComponent::SetMaxHealth(float32 max_health) {
-    max_health_ = max_health;
+    max_health_ = std::max(0.0f, max_health);
     health_ = std::min(health_, max_health_);
 }
 
@@ -64,171 +60,137 @@ void HealthComponent::SetMaxHealth(float32 max_health) {
 Weapon::Weapon(const WeaponConfig& config)
     : config_(config),
       ammo_in_magazine_(config.magazine_size),
-      reserve_ammo_(config.max_ammo) {}
+      reserve_ammo_(config.max_ammo),
+      rng_(config.seed) {}
 
 void Weapon::Update(float32 delta_time) {
+    cooldown_ = std::max(0.0f, cooldown_ - delta_time);
+
     switch (state_) {
         case WeaponState::Firing:
-            fire_timer_ -= delta_time;
-            if (fire_timer_ <= 0 && trigger_held_) {
-                PerformFire();
-            }
             if (!trigger_held_) {
                 state_ = WeaponState::Idle;
+            } else if (config_.automatic) {
+                // High fire rates may fire several shots per frame
+                while (trigger_held_ && cooldown_ <= 0.0f && ammo_in_magazine_ > 0) {
+                    PerformFire();
+                }
             }
             break;
 
         case WeaponState::Reloading:
             reload_timer_ -= delta_time;
-            if (reload_timer_ <= 0) {
-                int32 ammo_needed = config_.magazine_size - ammo_in_magazine_;
-                int32 ammo_to_add = std::min(ammo_needed, reserve_ammo_);
-                ammo_in_magazine_ += ammo_to_add;
-                reserve_ammo_ -= ammo_to_add;
+            if (reload_timer_ <= 0.0f) {
+                const int32 to_add = std::min(config_.magazine_size - ammo_in_magazine_, reserve_ammo_);
+                ammo_in_magazine_ += to_add;
+                reserve_ammo_ -= to_add;
                 state_ = WeaponState::Idle;
             }
             break;
 
         case WeaponState::Equipping:
             equip_timer_ -= delta_time;
-            if (equip_timer_ <= 0) {
-                state_ = WeaponState::Idle;
-            }
+            if (equip_timer_ <= 0.0f) state_ = WeaponState::Idle;
             break;
 
-        case WeaponState::Unequipping:
-            equip_timer_ -= delta_time;
-            if (equip_timer_ <= 0) {
-                state_ = WeaponState::Idle;
-            }
-            break;
-
-        default:
+        case WeaponState::Idle:
             break;
     }
 }
 
 bool Weapon::Fire() {
-    if (state_ != WeaponState::Idle && state_ != WeaponState::Firing) return false;
-
+    const bool new_pull = trigger_released_;
     trigger_held_ = true;
+    trigger_released_ = false;
+
+    if (state_ == WeaponState::Firing) return true;   // automatic fire continues in Update
+    if (state_ != WeaponState::Idle || !new_pull) return false;
 
     if (ammo_in_magazine_ <= 0) {
-        // Play empty click sound
-        // Audio::AudioSystem::Instance().PlaySound(config_.empty_sound);
+        if (on_empty_) on_empty_();
+        Reload();
         return false;
     }
+    if (cooldown_ > 0.0f) return false;
 
-    if (state_ == WeaponState::Idle) {
-        state_ = WeaponState::Firing;
-        PerformFire();
-    }
-
+    state_ = WeaponState::Firing;
+    PerformFire();
     return true;
 }
 
 void Weapon::StopFiring() {
     trigger_held_ = false;
+    trigger_released_ = true;
+    if (state_ == WeaponState::Firing) state_ = WeaponState::Idle;
 }
 
 void Weapon::Reload() {
-    if (state_ != WeaponState::Idle) return;
-    if (ammo_in_magazine_ >= config_.magazine_size) return;
-    if (reserve_ammo_ <= 0) return;
-
+    if (state_ != WeaponState::Idle && state_ != WeaponState::Firing) return;
+    if (ammo_in_magazine_ >= config_.magazine_size || reserve_ammo_ <= 0) return;
     state_ = WeaponState::Reloading;
     reload_timer_ = config_.reload_time;
-
-    // Play reload sound
-    // Audio::AudioSystem::Instance().PlaySound(config_.reload_sound);
 }
 
 void Weapon::Equip() {
     state_ = WeaponState::Equipping;
-    equip_timer_ = 0.5f;
-}
-
-void Weapon::Unequip() {
-    state_ = WeaponState::Unequipping;
-    equip_timer_ = 0.3f;
+    equip_timer_ = config_.equip_time;
+    trigger_held_ = false;
+    trigger_released_ = true;
 }
 
 void Weapon::AddAmmo(int32 amount) {
-    reserve_ammo_ = std::min(reserve_ammo_ + amount, config_.max_ammo);
+    reserve_ammo_ = std::clamp(reserve_ammo_ + amount, 0, config_.max_ammo);
+}
+
+Math::Vector3 Weapon::ApplySpread(const Math::Vector3& direction) {
+    if (config_.spread <= 0.0f) return direction;
+
+    // Uniform direction inside a cone of half-angle `spread`
+    std::uniform_real_distribution<float32> unit(0.0f, 1.0f);
+    const float32 angle = config_.spread * kDegToRad * std::sqrt(unit(rng_));
+    const float32 around = 2.0f * kPi * unit(rng_);
+
+    const Math::Vector3 helper = std::abs(direction.y) < 0.99f ? Math::Vector3::Up : Math::Vector3::Right;
+    const Math::Vector3 u = Math::Vector3::Cross(direction, helper).Normalized();
+    const Math::Vector3 v = Math::Vector3::Cross(u, direction);
+    const Math::Vector3 offset = (u * std::cos(around) + v * std::sin(around)) * std::sin(angle);
+    return (direction * std::cos(angle) + offset).Normalized();
 }
 
 void Weapon::PerformFire() {
-    if (ammo_in_magazine_ <= 0) return;
+    if (ammo_in_magazine_ <= 0 || !owner_) return;
 
-    ammo_in_magazine_--;
-    fire_timer_ = 1.0f / config_.fire_rate;
+    --ammo_in_magazine_;
+    ++shot_count_;
+    cooldown_ += 1.0f / std::max(0.01f, config_.fire_rate);
 
-    // Play fire sound
-    // Audio::AudioSystem::Instance().PlaySound(config_.fire_sound);
+    const Math::Vector3 origin = owner_->GetCameraPosition();
+    const Math::Vector3 direction = ApplySpread(owner_->GetAimDirection());
 
-    // Apply recoil
-    ApplyRecoil();
+    DamageInfo damage;
+    damage.amount = config_.damage;
+    damage.type = DamageType::Bullet;
+    damage.origin = origin;
+    damage.direction = direction;
+    damage.instigator = owner_;
+    damage.weapon = this;
 
-    // Perform raycast or spawn projectile
-    if (owner_) {
-        Math::Vector3 aim_origin = owner_->GetCameraPosition();
-        Math::Vector3 aim_dir = owner_->GetAimDirection();
-
-        // Apply spread
-        std::random_device rd;
-        std::mt19937 gen(rd());
-        std::uniform_real_distribution<float32> spread_dis(-1.0f, 1.0f);
-
-        float32 spread_rad = config_.spread * 3.14159265359f / 180.0f;
-        float32 spread_x = spread_dis(gen) * spread_rad;
-        float32 spread_y = spread_dis(gen) * spread_rad;
-
-        // Rotate aim direction by spread
-        Math::Quaternion spread_rot = Math::Quaternion::FromEuler(
-            Math::Vector3(spread_x, spread_y, 0)
-        );
-        aim_dir = spread_rot.Rotate(aim_dir);
-
-        if (config_.is_hitscan) {
-            // Hitscan weapon - raycast
-            // Physics::RaycastHit hit;
-            // if (Physics::PhysicsWorld::Instance().Raycast(aim_origin, aim_dir, config_.range, hit)) {
-            //     // Deal damage to hit target
-            //     DamageInfo damage;
-            //     damage.amount = config_.damage;
-            //     damage.type = DamageType::Bullet;
-            //     damage.origin = aim_origin;
-            //     damage.direction = aim_dir;
-            //     damage.instigator = owner_;
-            //     damage.weapon = this;
-            //     damage.impulse = 500.0f;
-            // }
-        } else {
-            // Projectile weapon
-            GameWorld::Instance().SpawnProjectile(
-                aim_origin,
-                aim_dir,
-                config_.projectile_speed,
-                config_.damage,
-                owner_
-            );
-        }
+    GameWorld& world = GameWorld::Instance();
+    if (config_.is_hitscan) {
+        last_shot_ = world.TraceShot(origin, direction, config_.range, damage, config_.critical_multiplier, owner_);
+    } else {
+        world.SpawnProjectile(origin, direction, config_.projectile_speed, damage, owner_, config_.projectile_gravity);
+        last_shot_ = {};
+        last_shot_.fired = true;
+        last_shot_.origin = origin;
+        last_shot_.end = origin + direction * config_.range;
     }
-}
 
-void Weapon::ApplyRecoil() {
-    if (!owner_) return;
-
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_real_distribution<float32> dis(-1.0f, 1.0f);
-
-    float32 recoil_pitch = config_.recoil * (0.8f + dis(gen) * 0.2f);
-    float32 recoil_yaw = config_.recoil * 0.3f * dis(gen);
-
-    // Apply to player look
-    Math::Vector2 recoil_input(recoil_yaw, -recoil_pitch);
-    owner_->SetLookInput(recoil_input);
+    if (config_.recoil > 0.0f) {
+        std::uniform_real_distribution<float32> jitter(-1.0f, 1.0f);
+        owner_->AddRecoil(config_.recoil * (0.9f + 0.1f * jitter(rng_)), config_.recoil * 0.3f * jitter(rng_));
+    }
+    if (on_shot_) on_shot_(last_shot_);
 }
 
 // ============================================================================
@@ -236,27 +198,36 @@ void Weapon::ApplyRecoil() {
 // ============================================================================
 
 Player::Player(const PlayerConfig& config)
-    : config_(config),
-      current_height_(config.standing_height),
-      health_(config.max_health) {
+    : config_(config), eye_height_(config.eye_height), health_(config.max_health) {
     weapons_.resize(static_cast<size_t>(WeaponSlot::MaxSlots));
 
     health_.SetOnDeath([this](const DamageInfo& damage) {
-        // Handle player death
+        if (GameMode* mode = GameWorld::Instance().GetGameMode()) {
+            mode->OnPlayerDeath(this, damage);
+            if (auto* killer = dynamic_cast<Player*>(damage.instigator); killer && killer != this) {
+                mode->OnPlayerKill(killer, this);
+            }
+        }
     });
 }
 
-Player::~Player() {
-    weapons_.clear();
+Player::~Player() = default;
+
+void Player::AttachController(SharedPtr<Physics::CharacterController> controller) {
+    if (controller) fallback_position_ = controller->GetPosition();
+    controller_ = std::move(controller);
+}
+
+SharedPtr<Physics::CharacterController> Player::DetachController() {
+    if (controller_) fallback_position_ = controller_->GetPosition();
+    return std::move(controller_);
 }
 
 void Player::Update(float32 delta_time) {
-    UpdateLook(delta_time);
-    UpdateMovement(delta_time);
-    UpdateWeapons(delta_time);
+    UpdateLook();
+    if (current_weapon_) current_weapon_->Update(delta_time);
 
-    // Health regeneration
-    if (config_.health_regen_rate > 0 && health_.GetHealth() < health_.GetMaxHealth()) {
+    if (config_.health_regen_rate > 0.0f && health_.IsAlive() && health_.GetHealth() < health_.GetMaxHealth()) {
         health_regen_timer_ += delta_time;
         if (health_regen_timer_ >= config_.health_regen_delay) {
             health_.Heal(config_.health_regen_rate * delta_time);
@@ -265,29 +236,66 @@ void Player::Update(float32 delta_time) {
 }
 
 void Player::FixedUpdate(float32 fixed_delta_time) {
-    CheckGround();
-    ApplyGravity(fixed_delta_time);
+    if (health_.IsAlive()) UpdateMovement(fixed_delta_time);
+}
 
-    // Update physics
-    if (character_controller_) {
-        // character_controller_->Move(velocity_ * fixed_delta_time);
+void Player::UpdateLook() {
+    yaw_ += look_input_.x * config_.look_sensitivity;
+    pitch_ -= look_input_.y * config_.look_sensitivity * (config_.invert_y ? -1.0f : 1.0f);
+    pitch_ = std::clamp(pitch_, -config_.max_pitch, config_.max_pitch);
+    yaw_ = std::fmod(yaw_, 360.0f);
+    look_input_ = Math::Vector2(0.0f, 0.0f);
+}
+
+void Player::UpdateMovement(float32 dt) {
+    const bool grounded = IsGrounded();
+
+    float32 speed = config_.walk_speed;
+    eye_height_ = config_.eye_height;
+    if (crouch_pressed_) {
+        speed = config_.crouch_speed;
+        eye_height_ = config_.crouch_eye_height;
+    } else if (sprint_pressed_ && move_input_.y > 0.5f && grounded) {
+        speed = config_.run_speed;
+    }
+
+    Math::Vector3 direction = GetForward() * move_input_.y + GetRight() * move_input_.x;
+    if (direction.LengthSquared() > 1.0f) direction = direction.Normalized();
+    const Math::Vector3 wish = direction * speed;
+
+    if (!controller_) {
+        fallback_position_ += wish * dt;
+        movement_state_ = MovementState::Walking;
+        return;
+    }
+
+    Math::Vector3 velocity = wish;
+    if (!grounded) {
+        // Limited steering in the air
+        const Math::Vector3 current = Horizontal(controller_->GetVelocity());
+        const float32 blend = std::clamp(config_.air_control * 10.0f * dt, 0.0f, 1.0f);
+        velocity = current + (wish - current) * blend;
+    }
+    const float32 jump_speed = jump_pressed_ && grounded ? std::sqrt(2.0f * config_.gravity * config_.jump_height) : 0.0f;
+    controller_->Move(velocity, jump_speed, dt);
+
+    if (!controller_->IsGrounded()) {
+        movement_state_ = controller_->GetVelocity().y > 0.0f ? MovementState::Jumping : MovementState::Falling;
+    } else if (crouch_pressed_) {
+        movement_state_ = MovementState::Crouching;
+    } else {
+        movement_state_ = speed > config_.walk_speed ? MovementState::Running : MovementState::Walking;
     }
 }
 
 void Player::SetFireInput(bool pressed) {
-    if (current_weapon_) {
-        if (pressed) {
-            current_weapon_->Fire();
-        } else {
-            current_weapon_->StopFiring();
-        }
-    }
+    if (!current_weapon_ || !health_.IsAlive()) return;
+    if (pressed) current_weapon_->Fire();
+    else current_weapon_->StopFiring();
 }
 
 void Player::SetReloadInput(bool pressed) {
-    if (pressed && current_weapon_) {
-        current_weapon_->Reload();
-    }
+    if (pressed && current_weapon_) current_weapon_->Reload();
 }
 
 void Player::SetWeaponSwitchInput(int32 slot) {
@@ -296,457 +304,353 @@ void Player::SetWeaponSwitchInput(int32 slot) {
     }
 }
 
+void Player::AddRecoil(float32 pitch_degrees, float32 yaw_degrees) {
+    pitch_ = std::clamp(pitch_ + pitch_degrees, -config_.max_pitch, config_.max_pitch);
+    yaw_ += yaw_degrees;
+}
+
+Math::Vector3 Player::GetVelocity() const {
+    return controller_ ? controller_->GetVelocity() : Math::Vector3();
+}
+
+bool Player::IsGrounded() const {
+    return controller_ ? controller_->IsGrounded() : true;
+}
+
+Math::Vector3 Player::GetPosition() const {
+    return controller_ ? controller_->GetPosition() : fallback_position_;
+}
+
 void Player::SetPosition(const Math::Vector3& position) {
-    position_ = position;
+    fallback_position_ = position;
+    if (controller_) {
+        Physics::CharacterState state;
+        state.position = position;
+        controller_->SetState(state);
+    }
+}
+
+void Player::SetLookAngles(float32 yaw, float32 pitch) {
+    yaw_ = yaw;
+    pitch_ = std::clamp(pitch, -config_.max_pitch, config_.max_pitch);
 }
 
 Math::Quaternion Player::GetRotation() const {
-    float32 rad = 3.14159265359f / 180.0f;
-    return Math::Quaternion::FromAxisAngle(Math::Vector3::Up, yaw_ * rad);
+    return Math::Quaternion::FromAxisAngle(Math::Vector3::Up, -yaw_ * kDegToRad);
+}
+
+Math::Vector3 Player::GetForward() const {
+    const float32 yaw = yaw_ * kDegToRad;
+    return Math::Vector3(std::sin(yaw), 0.0f, -std::cos(yaw));
+}
+
+Math::Vector3 Player::GetRight() const {
+    const float32 yaw = yaw_ * kDegToRad;
+    return Math::Vector3(std::cos(yaw), 0.0f, std::sin(yaw));
 }
 
 Math::Vector3 Player::GetCameraPosition() const {
-    return position_ + Math::Vector3(0, current_height_ + config_.camera_height_offset, 0);
+    return GetPosition() + Math::Vector3(0.0f, eye_height_, 0.0f);
 }
 
 Math::Vector3 Player::GetAimDirection() const {
-    float32 rad = 3.14159265359f / 180.0f;
-    float32 cos_pitch = cos(pitch_ * rad);
-    float32 sin_pitch = sin(pitch_ * rad);
-    float32 cos_yaw = cos(yaw_ * rad);
-    float32 sin_yaw = sin(yaw_ * rad);
-
-    return Math::Vector3(
-        cos_pitch * sin_yaw,
-        -sin_pitch,
-        cos_pitch * cos_yaw
-    );
+    const float32 yaw = yaw_ * kDegToRad;
+    const float32 pitch = pitch_ * kDegToRad;
+    return Math::Vector3(std::cos(pitch) * std::sin(yaw), std::sin(pitch), -std::cos(pitch) * std::cos(yaw));
 }
 
-float32 Player::GetCurrentFOV() const {
-    if (aim_pressed_ && current_weapon_) {
-        return current_weapon_->GetConfig().aim_fov;
-    }
-    return 90.0f;  // Default FOV
+float32 Player::GetCurrentFOV(float32 default_fov) const {
+    return aim_pressed_ && current_weapon_ ? current_weapon_->GetConfig().aim_fov : default_fov;
 }
 
 void Player::GiveWeapon(SharedPtr<Weapon> weapon) {
     if (!weapon) return;
-
-    WeaponSlot slot = weapon->GetConfig().slot;
-    weapons_[static_cast<size_t>(slot)] = weapon;
+    const auto slot = weapon->GetConfig().slot;
     weapon->SetOwner(this);
-
-    if (!current_weapon_) {
-        SwitchWeapon(slot);
-    }
+    weapons_[static_cast<size_t>(slot)] = std::move(weapon);
+    if (!current_weapon_) SwitchWeapon(slot);
 }
 
 void Player::RemoveWeapon(WeaponSlot slot) {
-    size_t index = static_cast<size_t>(slot);
-    if (index < weapons_.size()) {
-        if (weapons_[index].get() == current_weapon_) {
-            current_weapon_ = nullptr;
-            // Find another weapon to equip
-            for (auto& w : weapons_) {
-                if (w) {
-                    current_weapon_ = w.get();
-                    current_weapon_->Equip();
-                    break;
-                }
+    const auto index = static_cast<size_t>(slot);
+    if (index >= weapons_.size() || !weapons_[index]) return;
+
+    const bool was_current = weapons_[index].get() == current_weapon_;
+    weapons_[index].reset();
+    if (was_current) {
+        current_weapon_ = nullptr;
+        for (auto& weapon : weapons_) {
+            if (weapon) {
+                current_weapon_ = weapon.get();
+                current_weapon_->Equip();
+                break;
             }
         }
-        weapons_[index].reset();
     }
 }
 
 Weapon* Player::GetWeapon(WeaponSlot slot) const {
-    size_t index = static_cast<size_t>(slot);
+    const auto index = static_cast<size_t>(slot);
     return index < weapons_.size() ? weapons_[index].get() : nullptr;
 }
 
 void Player::SwitchWeapon(WeaponSlot slot) {
-    Weapon* new_weapon = GetWeapon(slot);
-    if (!new_weapon || new_weapon == current_weapon_) return;
-
-    if (current_weapon_) {
-        current_weapon_->Unequip();
-    }
-
-    current_weapon_ = new_weapon;
-    current_slot_ = slot;
+    Weapon* weapon = GetWeapon(slot);
+    if (!weapon || weapon == current_weapon_) return;
+    if (current_weapon_) current_weapon_->StopFiring();
+    current_weapon_ = weapon;
     current_weapon_->Equip();
 }
 
-void Player::AddArmor(float32 amount) {
-    armor_ = std::min(armor_ + amount, config_.max_armor);
-}
-
 void Player::TakeDamage(const DamageInfo& damage) {
-    // Reset health regen timer
-    health_regen_timer_ = 0;
+    if (!health_.IsAlive()) return;
+    health_regen_timer_ = 0.0f;
 
     DamageInfo modified = damage;
-
-    // Armor absorption
-    if (armor_ > 0) {
-        float32 armor_absorption = std::min(damage.amount * 0.5f, armor_);
-        armor_ -= armor_absorption;
-        modified.amount -= armor_absorption;
+    if (armor_ > 0.0f && damage.type != DamageType::Crush) {
+        const float32 absorbed = std::min(damage.amount * config_.armor_absorption, armor_);
+        armor_ -= absorbed;
+        modified.amount -= absorbed;
     }
-
     health_.TakeDamage(modified);
 }
 
-void Player::UpdateMovement(float32 delta_time) {
-    // Determine movement state and speed
-    float32 target_speed = config_.walk_speed;
-
-    if (crouch_pressed_) {
-        movement_state_ = MovementState::Crouching;
-        target_speed = config_.crouch_speed;
-        current_height_ = config_.crouch_height;
-    } else if (sprint_pressed_ && move_input_.y > 0.5f && is_grounded_) {
-        movement_state_ = MovementState::Running;
-        target_speed = config_.run_speed;
-        current_height_ = config_.standing_height;
-    } else if (!is_grounded_) {
-        movement_state_ = velocity_.y > 0 ? MovementState::Jumping : MovementState::Falling;
-    } else {
-        movement_state_ = MovementState::Walking;
-        current_height_ = config_.standing_height;
+void Player::Respawn(const Math::Vector3& position, float32 yaw) {
+    health_.Revive();
+    armor_ = 0.0f;
+    health_regen_timer_ = 0.0f;
+    SetPosition(position);
+    SetLookAngles(yaw, 0.0f);
+    for (auto& weapon : weapons_) {
+        if (weapon) weapon->StopFiring();
     }
-
-    // Calculate move direction
-    float32 rad = 3.14159265359f / 180.0f;
-    float32 cos_yaw = cos(yaw_ * rad);
-    float32 sin_yaw = sin(yaw_ * rad);
-
-    Math::Vector3 forward(sin_yaw, 0, cos_yaw);
-    Math::Vector3 right(cos_yaw, 0, -sin_yaw);
-
-    Math::Vector3 move_dir = forward * move_input_.y + right * move_input_.x;
-    if (move_dir.LengthSquared() > 1.0f) {
-        move_dir = move_dir.Normalized();
-    }
-
-    // Apply movement
-    if (is_grounded_) {
-        velocity_.x = move_dir.x * target_speed;
-        velocity_.z = move_dir.z * target_speed;
-    } else {
-        // Air control
-        velocity_.x += move_dir.x * target_speed * config_.air_control * delta_time;
-        velocity_.z += move_dir.z * target_speed * config_.air_control * delta_time;
-
-        // Clamp horizontal velocity
-        float32 horizontal_speed = std::sqrt(velocity_.x * velocity_.x + velocity_.z * velocity_.z);
-        if (horizontal_speed > target_speed) {
-            velocity_.x = (velocity_.x / horizontal_speed) * target_speed;
-            velocity_.z = (velocity_.z / horizontal_speed) * target_speed;
-        }
-    }
-
-    // Jump
-    if (jump_pressed_ && is_grounded_) {
-        Jump();
-    }
-
-    // Apply velocity to position
-    position_ = position_ + velocity_ * delta_time;
-}
-
-void Player::UpdateLook(float32 delta_time) {
-    yaw_ += look_input_.x * config_.look_sensitivity;
-    pitch_ += look_input_.y * config_.look_sensitivity * (config_.invert_y ? -1.0f : 1.0f);
-    pitch_ = std::clamp(pitch_, -config_.max_pitch, config_.max_pitch);
-
-    // Clear look input
-    look_input_ = Math::Vector2(0, 0);
-}
-
-void Player::UpdateWeapons(float32 delta_time) {
-    if (current_weapon_) {
-        current_weapon_->Update(delta_time);
-    }
-}
-
-void Player::CheckGround() {
-    // Raycast down to check if grounded
-    // For now, simple Y check
-    is_grounded_ = position_.y <= 0.01f;
-    if (is_grounded_ && position_.y < 0) {
-        position_.y = 0;
-        velocity_.y = 0;
-    }
-}
-
-void Player::ApplyGravity(float32 delta_time) {
-    if (!is_grounded_) {
-        velocity_.y -= 9.81f * delta_time;
-    }
-}
-
-void Player::Jump() {
-    velocity_.y = config_.jump_force;
-    is_grounded_ = false;
-    movement_state_ = MovementState::Jumping;
 }
 
 // ============================================================================
 // Enemy
 // ============================================================================
 
-Enemy::Enemy(const EnemyConfig& config)
-    : config_(config), health_(config.max_health) {
-
-    health_.SetOnDeath([this](const DamageInfo& damage) {
-        Die(damage);
-    });
+Enemy::Enemy(const EnemyConfig& config) : config_(config), health_(config.max_health) {
+    health_.SetOnDeath([this](const DamageInfo& damage) { Die(damage); });
 }
 
-Enemy::~Enemy() {}
+Enemy::~Enemy() = default;
+
+void Enemy::AttachController(SharedPtr<Physics::CharacterController> controller) {
+    if (controller) fallback_position_ = controller->GetPosition();
+    controller_ = std::move(controller);
+}
+
+SharedPtr<Physics::CharacterController> Enemy::DetachController() {
+    if (controller_) fallback_position_ = controller_->GetPosition();
+    return std::move(controller_);
+}
+
+Math::Vector3 Enemy::GetPosition() const {
+    return controller_ ? controller_->GetPosition() : fallback_position_;
+}
+
+void Enemy::SetPosition(const Math::Vector3& position) {
+    fallback_position_ = position;
+    if (controller_) controller_->SetPosition(position);
+}
 
 void Enemy::Update(float32 delta_time) {
     if (ai_state_ == EnemyAIState::Dead) return;
-
+    attack_timer_ = std::max(0.0f, attack_timer_ - delta_time);
     UpdateAI(delta_time);
+}
 
-    // Update attack timer
-    if (attack_timer_ > 0) {
-        attack_timer_ -= delta_time;
-    }
+void Enemy::FixedUpdate(float32 fixed_delta_time) {
+    const Math::Vector3 velocity = ai_state_ == EnemyAIState::Dead ? Math::Vector3::Zero : wish_velocity_;
+    if (controller_) controller_->Move(velocity, 0.0f, fixed_delta_time);
+    else fallback_position_ += velocity * fixed_delta_time;
 }
 
 void Enemy::TakeDamage(const DamageInfo& damage) {
+    if (ai_state_ == EnemyAIState::Dead) return;
     health_.TakeDamage(damage);
+    if (ai_state_ == EnemyAIState::Dead) return;
 
-    // Alert to attacker
-    if (damage.instigator) {
-        target_ = static_cast<Player*>(damage.instigator);
-        last_known_target_pos_ = target_->GetPosition();
-
-        if (ai_state_ != EnemyAIState::Attack && ai_state_ != EnemyAIState::Dead) {
-            ai_state_ = EnemyAIState::Chase;
-        }
+    if (auto* attacker = dynamic_cast<Player*>(damage.instigator)) {
+        target_ = attacker;
+        last_known_target_pos_ = attacker->GetPosition();
+        const bool should_flee = config_.flee_health_fraction > 0.0f &&
+                                 health_.GetHealthPercent() < config_.flee_health_fraction;
+        if (should_flee) ai_state_ = EnemyAIState::Flee;
+        else if (ai_state_ != EnemyAIState::Attack) ai_state_ = EnemyAIState::Chase;
     }
 }
 
 void Enemy::UpdateAI(float32 delta_time) {
     switch (ai_state_) {
-        case EnemyAIState::Idle:
-            UpdateIdle(delta_time);
-            break;
-        case EnemyAIState::Patrol:
-            UpdatePatrol(delta_time);
-            break;
-        case EnemyAIState::Chase:
-            UpdateChase(delta_time);
-            break;
-        case EnemyAIState::Attack:
-            UpdateAttack(delta_time);
-            break;
-        case EnemyAIState::Search:
-            UpdateSearch(delta_time);
-            break;
-        case EnemyAIState::Flee:
-            UpdateFlee(delta_time);
-            break;
-        default:
-            break;
+        case EnemyAIState::Idle: UpdateIdle(); break;
+        case EnemyAIState::Patrol: UpdatePatrol(); break;
+        case EnemyAIState::Chase: UpdateChase(); break;
+        case EnemyAIState::Attack: UpdateAttack(); break;
+        case EnemyAIState::Search: UpdateSearch(delta_time); break;
+        case EnemyAIState::Flee: UpdateFlee(); break;
+        case EnemyAIState::Dead: break;
     }
 }
 
-void Enemy::UpdateIdle(float32 delta_time) {
-    // Check for player
-    if (CanSeeTarget() || CanHearTarget()) {
-        ai_state_ = EnemyAIState::Chase;
+void Enemy::MoveTowards(const Math::Vector3& point, float32 speed) {
+    const Math::Vector3 to = Horizontal(point - GetPosition());
+    if (to.LengthSquared() < 1e-6f) {
+        wish_velocity_ = Math::Vector3::Zero;
         return;
     }
-
-    // Random chance to start patrolling
-    if (!patrol_points_.empty()) {
-        ai_state_ = EnemyAIState::Patrol;
-    }
+    const Math::Vector3 direction = to.Normalized();
+    wish_velocity_ = direction * speed;
+    FaceDirection(direction);
 }
 
-void Enemy::UpdatePatrol(float32 delta_time) {
-    // Check for player
+void Enemy::FaceDirection(const Math::Vector3& direction) {
+    const Math::Vector3 flat = Horizontal(direction);
+    if (flat.LengthSquared() > 1e-6f) rotation_ = Math::Quaternion::LookRotation(flat.Normalized(), Math::Vector3::Up);
+}
+
+void Enemy::UpdateIdle() {
+    wish_velocity_ = Math::Vector3::Zero;
+    if (CanSeeTarget() || CanHearTarget()) ai_state_ = EnemyAIState::Chase;
+    else if (!patrol_points_.empty()) ai_state_ = EnemyAIState::Patrol;
+}
+
+void Enemy::UpdatePatrol() {
     if (CanSeeTarget()) {
         ai_state_ = EnemyAIState::Chase;
         return;
     }
-
     if (patrol_points_.empty()) {
         ai_state_ = EnemyAIState::Idle;
         return;
     }
-
-    // Move towards current patrol point
-    Math::Vector3 target = patrol_points_[current_patrol_index_];
-    Math::Vector3 dir = target - position_;
-    float32 dist = dir.Length();
-
-    if (dist < 1.0f) {
-        // Reached patrol point
-        current_patrol_index_ = (current_patrol_index_ + 1) % patrol_points_.size();
-    } else {
-        dir = dir.Normalized();
-        velocity_ = dir * config_.walk_speed;
-        position_ = position_ + velocity_ * delta_time;
-
-        // Face movement direction
-        rotation_ = Math::Quaternion::LookRotation(dir, Math::Vector3::Up);
+    const Math::Vector3& point = patrol_points_[current_patrol_index_];
+    if (Horizontal(point - GetPosition()).Length() < 0.5f) {
+        current_patrol_index_ = (current_patrol_index_ + 1) % static_cast<uint32>(patrol_points_.size());
     }
+    MoveTowards(patrol_points_[current_patrol_index_], config_.walk_speed);
 }
 
-void Enemy::UpdateChase(float32 delta_time) {
-    if (!target_) {
+void Enemy::UpdateChase() {
+    if (!target_ || !target_->IsAlive()) {
+        target_ = target_ && target_->IsAlive() ? target_ : nullptr;
         ai_state_ = EnemyAIState::Search;
+        search_timer_ = config_.search_duration;
         return;
     }
 
-    if (CanSeeTarget()) {
-        last_known_target_pos_ = target_->GetPosition();
-    }
+    const bool sees = CanSeeTarget();
+    if (sees) last_known_target_pos_ = target_->GetPosition();
 
-    // Move towards target
-    Math::Vector3 dir = last_known_target_pos_ - position_;
-    float32 dist = dir.Length();
-
-    if (dist <= config_.attack_range) {
+    const float32 distance = Horizontal(last_known_target_pos_ - GetPosition()).Length();
+    if (sees && distance <= config_.attack_range) {
         ai_state_ = EnemyAIState::Attack;
+        wish_velocity_ = Math::Vector3::Zero;
         return;
     }
-
-    // Check if we lost the target
-    if (!CanSeeTarget() && !CanHearTarget()) {
-        if (dist < 2.0f) {
-            ai_state_ = EnemyAIState::Search;
-            search_timer_ = config_.search_duration;
-            return;
-        }
+    if (!sees && !CanHearTarget() && distance < 1.0f) {
+        ai_state_ = EnemyAIState::Search;
+        search_timer_ = config_.search_duration;
+        return;
     }
-
-    dir = dir.Normalized();
-    velocity_ = dir * config_.run_speed;
-    position_ = position_ + velocity_ * delta_time;
-    rotation_ = Math::Quaternion::LookRotation(dir, Math::Vector3::Up);
+    MoveTowards(last_known_target_pos_, config_.run_speed);
 }
 
-void Enemy::UpdateAttack(float32 delta_time) {
-    if (!target_ || target_->GetHealth().IsDead()) {
-        ai_state_ = EnemyAIState::Idle;
+void Enemy::UpdateAttack() {
+    wish_velocity_ = Math::Vector3::Zero;
+    if (!target_ || !target_->IsAlive()) {
         target_ = nullptr;
+        ai_state_ = EnemyAIState::Idle;
         return;
     }
 
-    // Face target
-    Math::Vector3 dir = target_->GetPosition() - position_;
-    float32 dist = dir.Length();
-
-    if (dist > config_.attack_range * 1.5f) {
+    const Math::Vector3 to_target = target_->GetPosition() - GetPosition();
+    if (Horizontal(to_target).Length() > config_.attack_range * 1.25f || !CanSeeTarget()) {
         ai_state_ = EnemyAIState::Chase;
         return;
     }
-
-    dir = dir.Normalized();
-    rotation_ = Math::Quaternion::LookRotation(dir, Math::Vector3::Up);
-
-    // Attack when ready
-    if (attack_timer_ <= 0) {
+    FaceDirection(to_target);
+    if (attack_timer_ <= 0.0f) {
         Attack();
-        attack_timer_ = 1.0f / config_.attack_rate;
+        attack_timer_ = 1.0f / std::max(0.01f, config_.attack_rate);
     }
 }
 
 void Enemy::UpdateSearch(float32 delta_time) {
     search_timer_ -= delta_time;
-
     if (CanSeeTarget() || CanHearTarget()) {
         ai_state_ = EnemyAIState::Chase;
         return;
     }
-
-    if (search_timer_ <= 0) {
-        ai_state_ = EnemyAIState::Patrol;
-        target_ = nullptr;
+    MoveTowards(last_known_target_pos_, config_.walk_speed);
+    if (search_timer_ <= 0.0f) {
+        ai_state_ = patrol_points_.empty() ? EnemyAIState::Idle : EnemyAIState::Patrol;
     }
-
-    // Look around randomly
-    // Move to last known position
 }
 
-void Enemy::UpdateFlee(float32 delta_time) {
+void Enemy::UpdateFlee() {
     if (!target_) {
         ai_state_ = EnemyAIState::Idle;
         return;
     }
-
-    // Run away from target
-    Math::Vector3 dir = position_ - target_->GetPosition();
-    dir = dir.Normalized();
-
-    velocity_ = dir * config_.run_speed;
-    position_ = position_ + velocity_ * delta_time;
-    rotation_ = Math::Quaternion::LookRotation(dir, Math::Vector3::Up);
-
-    // Stop fleeing if far enough
-    float32 dist = (position_ - target_->GetPosition()).Length();
-    if (dist > config_.sight_range * 1.5f) {
+    const Math::Vector3 away = Horizontal(GetPosition() - target_->GetPosition());
+    if (away.Length() > config_.sight_range) {
         ai_state_ = EnemyAIState::Idle;
+        wish_velocity_ = Math::Vector3::Zero;
+        return;
     }
+    MoveTowards(GetPosition() + (away.LengthSquared() > 1e-6f ? away.Normalized() : Math::Vector3::Forward),
+                config_.run_speed);
 }
 
 bool Enemy::CanSeeTarget() const {
-    if (!target_) return false;
+    if (!target_ || !target_->IsAlive()) return false;
 
-    Math::Vector3 to_target = target_->GetPosition() - position_;
-    float32 dist = to_target.Length();
+    const Math::Vector3 eye = GetPosition() + Math::Vector3(0.0f, config_.height * 0.9f, 0.0f);
+    const Math::Vector3 target_eye = target_->GetCameraPosition();
+    Math::Vector3 to_target = target_eye - eye;
+    const float32 distance = to_target.Length();
+    if (distance > config_.sight_range) return false;
+    if (distance < 1e-4f) return true;
 
-    if (dist > config_.sight_range) return false;
+    to_target = to_target / distance;
+    const Math::Vector3 forward = rotation_.Rotate(Math::Vector3::Forward);
+    const float32 cos_half_angle = std::cos(config_.sight_angle * 0.5f * kDegToRad);
+    if (Math::Vector3::Dot(Horizontal(forward).Normalized(), Horizontal(to_target).Normalized()) < cos_half_angle) {
+        return false;
+    }
 
-    // Check angle
-    to_target = to_target.Normalized();
-    Math::Vector3 forward = rotation_.Rotate(Math::Vector3::Forward);
-    float32 dot = Math::Vector3::Dot(forward, to_target);
-    float32 angle = std::acos(dot) * 180.0f / 3.14159265359f;
-
-    if (angle > config_.sight_angle * 0.5f) return false;
-
-    // Would also raycast for line of sight check
-    return true;
+    // Line of sight: the first thing hit must be the target
+    Physics::QueryFilter filter;
+    filter.ignore_character = controller_.get();
+    const Physics::RaycastResult hit = GameWorld::Instance().GetPhysics().Raycast(eye, target_eye, filter);
+    return !hit.hit || GameWorld::Instance().FindDamageable(hit.body_user_data) == target_;
 }
 
 bool Enemy::CanHearTarget() const {
-    if (!target_) return false;
-
-    float32 dist = (target_->GetPosition() - position_).Length();
-    return dist <= config_.hearing_range;
+    return target_ && target_->IsAlive() &&
+           (target_->GetPosition() - GetPosition()).Length() <= config_.hearing_range;
 }
 
 void Enemy::Attack() {
     if (!target_) return;
-
     DamageInfo damage;
     damage.amount = config_.damage;
     damage.type = DamageType::Melee;
-    damage.origin = position_;
-    damage.direction = (target_->GetPosition() - position_).Normalized();
-    damage.instigator = nullptr;  // Would be this enemy
-    damage.impulse = 200.0f;
-
+    damage.origin = GetPosition();
+    damage.direction = (target_->GetPosition() - GetPosition()).Normalized();
+    damage.hit_point = target_->GetPosition();
+    damage.instigator = this;
     target_->TakeDamage(damage);
 }
 
 void Enemy::Die(const DamageInfo& damage) {
     ai_state_ = EnemyAIState::Dead;
-    velocity_ = Math::Vector3::Zero;
-
-    // Award score/XP
-    GameMode* mode = GameWorld::Instance().GetGameMode();
-    if (mode) {
+    wish_velocity_ = Math::Vector3::Zero;
+    if (GameMode* mode = GameWorld::Instance().GetGameMode()) {
         mode->AddScore(config_.score_value);
+        mode->OnEnemyDeath(this, damage);
     }
 }
 
@@ -754,11 +658,9 @@ void Enemy::Die(const DamageInfo& damage) {
 // GameMode
 // ============================================================================
 
-GameMode::GameMode() {}
-
 void GameMode::Initialize() {
     match_active_ = false;
-    match_time_ = 0;
+    match_time_ = 0.0f;
     score_ = 0;
 }
 
@@ -769,18 +671,13 @@ void GameMode::Shutdown() {
 
 void GameMode::Update(float32 delta_time) {
     if (!match_active_) return;
-
     match_time_ += delta_time;
-
-    // Check time limit
-    if (time_limit_ > 0 && match_time_ >= time_limit_) {
-        EndMatch();
-    }
+    if (time_limit_ > 0.0f && match_time_ >= time_limit_) EndMatch();
 }
 
 void GameMode::StartMatch() {
     match_active_ = true;
-    match_time_ = 0;
+    match_time_ = 0.0f;
     score_ = 0;
 }
 
@@ -794,34 +691,19 @@ void GameMode::RestartMatch() {
 }
 
 void GameMode::OnPlayerSpawn(Player* player) {
-    if (player && std::find(players_.begin(), players_.end(), player) == players_.end()) {
-        players_.push_back(player);
-    }
+    if (player && std::find(players_.begin(), players_.end(), player) == players_.end()) players_.push_back(player);
 }
 
-void GameMode::OnPlayerDeath(Player* player, const DamageInfo& damage) {
-    // Handle player death - respawn, game over, etc.
-}
+void GameMode::OnPlayerDeath(Player* /*player*/, const DamageInfo& /*damage*/) {}
 
-void GameMode::OnPlayerKill(Player* killer, Player* victim) {
-    // Handle PvP kills
-}
+void GameMode::OnPlayerKill(Player* /*killer*/, Player* /*victim*/) {}
 
 void GameMode::OnEnemySpawn(Enemy* enemy) {
-    if (enemy && std::find(enemies_.begin(), enemies_.end(), enemy) == enemies_.end()) {
-        enemies_.push_back(enemy);
-    }
+    if (enemy && std::find(enemies_.begin(), enemies_.end(), enemy) == enemies_.end()) enemies_.push_back(enemy);
 }
 
-void GameMode::OnEnemyDeath(Enemy* enemy, const DamageInfo& damage) {
-    enemies_.erase(
-        std::remove(enemies_.begin(), enemies_.end(), enemy),
-        enemies_.end()
-    );
-}
-
-void GameMode::AddScore(int32 amount) {
-    score_ += amount;
+void GameMode::OnEnemyDeath(Enemy* enemy, const DamageInfo& /*damage*/) {
+    enemies_.erase(std::remove(enemies_.begin(), enemies_.end(), enemy), enemies_.end());
 }
 
 // ============================================================================
@@ -833,153 +715,210 @@ GameWorld& GameWorld::Instance() {
     return instance;
 }
 
-bool GameWorld::Initialize() {
-    return true;
+bool GameWorld::Initialize(const Math::Vector3& gravity) {
+    return physics_.Initialize(gravity);
 }
 
 void GameWorld::Shutdown() {
+    if (game_mode_) game_mode_->Shutdown();
+    game_mode_.reset();
+    for (auto& player : players_) physics_.DestroyCharacterController(player->DetachController());
+    for (auto& enemy : enemies_) physics_.DestroyCharacterController(enemy->DetachController());
     players_.clear();
     enemies_.clear();
+    damageables_.clear();
     spawn_points_.clear();
     projectiles_.clear();
-    game_mode_.reset();
+    static_bodies_.clear();
     local_player_ = nullptr;
+    physics_.Shutdown();
 }
 
 void GameWorld::Update(float32 delta_time) {
-    // Update game mode
-    if (game_mode_) {
-        game_mode_->Update(delta_time);
-    }
-
-    // Update players
-    for (auto& player : players_) {
-        player->Update(delta_time);
-    }
-
-    // Update enemies
-    for (auto& enemy : enemies_) {
-        enemy->Update(delta_time);
-    }
-
-    // Update projectiles
-    for (auto it = projectiles_.begin(); it != projectiles_.end();) {
-        it->lifetime -= delta_time;
-        if (it->lifetime <= 0) {
-            it = projectiles_.erase(it);
-            continue;
-        }
-
-        it->position = it->position + it->velocity * delta_time;
-
-        // Check for collision
-        // Physics raycast here
-
-        ++it;
-    }
+    if (game_mode_) game_mode_->Update(delta_time);
+    for (auto& player : players_) player->Update(delta_time);
+    for (auto& enemy : enemies_) enemy->Update(delta_time);
 }
 
 void GameWorld::FixedUpdate(float32 fixed_delta_time) {
-    for (auto& player : players_) {
-        player->FixedUpdate(fixed_delta_time);
-    }
+    for (auto& player : players_) player->FixedUpdate(fixed_delta_time);
+    for (auto& enemy : enemies_) enemy->FixedUpdate(fixed_delta_time);
+    physics_.Step(fixed_delta_time);
+    UpdateProjectiles(fixed_delta_time);
 }
 
-Player* GameWorld::SpawnPlayer(const Math::Vector3& position) {
-    auto player = std::make_shared<Player>();
+SharedPtr<Physics::RigidBody> GameWorld::AddStaticBox(const Math::Vector3& center, const Math::Vector3& size,
+                                                      const Math::Quaternion& rotation) {
+    Physics::RigidBodyDesc desc;
+    desc.type = Physics::RigidBodyType::Static;
+    desc.shape.type = Physics::CollisionShapeType::Box;
+    desc.shape.half_extents = size * 0.5f;
+    desc.initial_transform.position = center;
+    desc.initial_transform.rotation = rotation;
+    desc.layer = Physics::CollisionLayer::Static;
+    auto body = physics_.CreateRigidBody(desc);
+    if (body) static_bodies_.push_back(body);
+    return body;
+}
+
+SharedPtr<Physics::CharacterController> GameWorld::CreateController(Damageable* owner, float32 radius, float32 height,
+                                                                    float32 gravity, const Math::Vector3& feet) {
+    if (!physics_.IsInitialized()) return nullptr;
+    Physics::CharacterSettings settings;
+    settings.radius = radius;
+    settings.height = height;
+    settings.gravity = gravity;
+    settings.user_data = owner;   // resolved through FindDamageable
+    return physics_.CreateCharacterController(settings, feet);
+}
+
+Player* GameWorld::SpawnPlayer(const Math::Vector3& position, const PlayerConfig& config, float32 yaw) {
+    auto player = MakeShared<Player>(config);
+    player->AttachController(CreateController(player.get(), config.radius, config.standing_height, config.gravity,
+                                              position));
     player->SetPosition(position);
+    player->SetLookAngles(yaw, 0.0f);
+
+    damageables_.insert(player.get());
     players_.push_back(player);
-
-    if (!local_player_) {
-        local_player_ = player.get();
-    }
-
-    if (game_mode_) {
-        game_mode_->OnPlayerSpawn(player.get());
-    }
-
+    if (!local_player_) local_player_ = player.get();
+    if (game_mode_) game_mode_->OnPlayerSpawn(player.get());
     return player.get();
 }
 
 void GameWorld::RemovePlayer(Player* player) {
-    players_.erase(
-        std::remove_if(players_.begin(), players_.end(),
-            [player](const SharedPtr<Player>& p) { return p.get() == player; }),
-        players_.end()
-    );
+    const auto it = std::find_if(players_.begin(), players_.end(),
+                                 [player](const SharedPtr<Player>& p) { return p.get() == player; });
+    if (it == players_.end()) return;
 
-    if (local_player_ == player) {
-        local_player_ = players_.empty() ? nullptr : players_[0].get();
+    physics_.DestroyCharacterController(player->DetachController());
+    damageables_.erase(player);
+    for (auto& enemy : enemies_) {
+        if (enemy->GetTarget() == player) enemy->SetTarget(nullptr);
     }
+    players_.erase(it);
+    if (local_player_ == player) local_player_ = players_.empty() ? nullptr : players_.front().get();
 }
 
 Enemy* GameWorld::SpawnEnemy(const EnemyConfig& config, const Math::Vector3& position) {
-    auto enemy = std::make_shared<Enemy>(config);
+    auto enemy = MakeShared<Enemy>(config);
+    enemy->AttachController(CreateController(enemy.get(), config.radius, config.height, 20.0f, position));
     enemy->SetPosition(position);
+    if (local_player_) enemy->SetTarget(local_player_);
 
-    // Set target to local player
-    if (local_player_) {
-        enemy->SetTarget(local_player_);
-    }
-
+    damageables_.insert(enemy.get());
     enemies_.push_back(enemy);
-
-    if (game_mode_) {
-        game_mode_->OnEnemySpawn(enemy.get());
-    }
-
+    if (game_mode_) game_mode_->OnEnemySpawn(enemy.get());
     return enemy.get();
 }
 
 void GameWorld::RemoveEnemy(Enemy* enemy) {
-    enemies_.erase(
-        std::remove_if(enemies_.begin(), enemies_.end(),
-            [enemy](const SharedPtr<Enemy>& e) { return e.get() == enemy; }),
-        enemies_.end()
-    );
+    const auto it = std::find_if(enemies_.begin(), enemies_.end(),
+                                 [enemy](const SharedPtr<Enemy>& e) { return e.get() == enemy; });
+    if (it == enemies_.end()) return;
+    physics_.DestroyCharacterController(enemy->DetachController());
+    damageables_.erase(enemy);
+    enemies_.erase(it);
 }
 
 void GameWorld::AddSpawnPoint(const SpawnPoint& point) {
     spawn_points_.push_back(point);
 }
 
-SpawnPoint GameWorld::GetRandomSpawnPoint(bool player_spawn) const {
-    Array<const SpawnPoint*> valid_points;
+bool GameWorld::GetRandomSpawnPoint(bool player_spawn, SpawnPoint& out) {
+    Array<const SpawnPoint*> candidates;
     for (const auto& point : spawn_points_) {
-        if ((player_spawn && point.is_player_spawn) ||
-            (!player_spawn && point.is_enemy_spawn)) {
-            valid_points.push_back(&point);
-        }
+        if (player_spawn ? point.is_player_spawn : point.is_enemy_spawn) candidates.push_back(&point);
     }
-
-    if (valid_points.empty()) {
-        return SpawnPoint{};
-    }
-
-    std::random_device rd;
-    std::mt19937 gen(rd());
-    std::uniform_int_distribution<size_t> dis(0, valid_points.size() - 1);
-
-    return *valid_points[dis(gen)];
+    if (candidates.empty()) return false;
+    std::uniform_int_distribution<size_t> pick(0, candidates.size() - 1);
+    out = *candidates[pick(rng_)];
+    return true;
 }
 
 void GameWorld::SetGameMode(SharedPtr<GameMode> mode) {
-    game_mode_ = mode;
-    if (game_mode_) {
-        game_mode_->Initialize();
-    }
+    if (game_mode_) game_mode_->Shutdown();
+    game_mode_ = std::move(mode);
+    if (!game_mode_) return;
+    game_mode_->Initialize();
+    for (auto& player : players_) game_mode_->OnPlayerSpawn(player.get());
+    for (auto& enemy : enemies_) game_mode_->OnEnemySpawn(enemy.get());
 }
 
-void GameWorld::SpawnProjectile(const Math::Vector3& position, const Math::Vector3& direction,
-                                 float32 speed, float32 damage, void* owner) {
-    ActiveProjectile proj;
-    proj.position = position;
-    proj.velocity = direction * speed;
-    proj.damage = damage;
-    proj.owner = owner;
-    proj.lifetime = 5.0f;
+Damageable* GameWorld::FindDamageable(void* user_data) const {
+    auto* candidate = static_cast<Damageable*>(user_data);
+    return candidate && damageables_.count(candidate) ? candidate : nullptr;
+}
 
-    projectiles_.push_back(proj);
+ShotResult GameWorld::TraceShot(const Math::Vector3& origin, const Math::Vector3& direction, float32 range,
+                                DamageInfo damage, float32 critical_multiplier, Damageable* ignore) {
+    ShotResult shot;
+    shot.fired = true;
+    shot.origin = origin;
+    shot.end = origin + direction * range;
+
+    for (const Physics::RaycastResult& hit : physics_.RaycastAll(origin, shot.end)) {
+        Damageable* target = FindDamageable(hit.body_user_data);
+        if (target && target == ignore) continue;
+
+        shot.hit = true;
+        shot.end = hit.point;
+        shot.normal = hit.normal;
+        if (target && target->IsAlive()) {
+            shot.target = target;
+            const float32 critical_height = target->GetCriticalHeight();
+            shot.critical = critical_height > 0.0f && hit.point.y - target->GetPosition().y >= critical_height;
+            damage.hit_point = hit.point;
+            damage.is_critical = shot.critical;
+            if (shot.critical) damage.amount *= critical_multiplier;
+            target->TakeDamage(damage);
+        }
+        break;
+    }
+    return shot;
+}
+
+void GameWorld::SpawnProjectile(const Math::Vector3& position, const Math::Vector3& direction, float32 speed,
+                                const DamageInfo& damage, Damageable* owner, float32 gravity, float32 lifetime) {
+    Projectile projectile;
+    projectile.position = position;
+    projectile.velocity = direction.Normalized() * speed;
+    projectile.damage = damage;
+    projectile.owner = owner;
+    projectile.gravity = gravity;
+    projectile.lifetime = lifetime;
+    projectiles_.push_back(projectile);
+}
+
+void GameWorld::UpdateProjectiles(float32 dt) {
+    for (auto it = projectiles_.begin(); it != projectiles_.end();) {
+        Projectile& p = *it;
+        p.lifetime -= dt;
+        p.velocity.y -= p.gravity * dt;
+        const Math::Vector3 next = p.position + p.velocity * dt;
+
+        bool consumed = p.lifetime <= 0.0f;
+        for (const Physics::RaycastResult& hit : physics_.RaycastAll(p.position, next)) {
+            Damageable* target = FindDamageable(hit.body_user_data);
+            if (target && target == p.owner) continue;
+            if (target && target->IsAlive()) {
+                DamageInfo damage = p.damage;
+                damage.hit_point = hit.point;
+                damage.direction = p.velocity.Normalized();
+                target->TakeDamage(damage);
+            }
+            if (on_projectile_impact_) on_projectile_impact_(p, hit);
+            consumed = true;
+            break;
+        }
+
+        if (consumed) {
+            it = projectiles_.erase(it);
+        } else {
+            p.position = next;
+            ++it;
+        }
+    }
 }
 
 } // namespace DRX::Game

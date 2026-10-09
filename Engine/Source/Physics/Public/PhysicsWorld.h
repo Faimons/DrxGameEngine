@@ -1,6 +1,9 @@
 /**
  * DRX Engine - Physics System
- * Bullet Physics integration for rigid body dynamics
+ * Bullet-based rigid bodies, scene queries and a kinematic character controller.
+ *
+ * Conventions: Y is up, units are metres. Capsule `height` is the total height including
+ * both caps. Step the world from a fixed-timestep update for deterministic results.
  */
 
 #pragma once
@@ -10,6 +13,9 @@
 #include "Core/Public/Math/Quaternion.h"
 #include "Core/Public/Math/Transform.h"
 
+#include <set>
+#include <utility>
+
 // Forward declare Bullet types to avoid header pollution
 class btDefaultCollisionConfiguration;
 class btCollisionDispatcher;
@@ -17,14 +23,18 @@ class btBroadphaseInterface;
 class btSequentialImpulseConstraintSolver;
 class btDiscreteDynamicsWorld;
 class btCollisionShape;
+class btCollisionObject;
+class btConvexShape;
 class btRigidBody;
 class btMotionState;
+class btTriangleMesh;
 
 namespace DRX::Physics {
 
-/**
- * Collision shape types
- */
+class PhysicsWorld;
+class RigidBody;
+class CharacterController;
+
 enum class CollisionShapeType : uint32 {
     Box,
     Sphere,
@@ -32,47 +42,50 @@ enum class CollisionShapeType : uint32 {
     Cylinder,
     Cone,
     ConvexHull,
-    TriangleMesh,
-    Compound
+    TriangleMesh    // static bodies only
 };
 
-/**
- * Rigid body type
- */
 enum class RigidBodyType : uint32 {
-    Static,      // Mass = 0, doesn't move
-    Dynamic,     // Fully simulated
-    Kinematic    // Moved by user, affects dynamics
+    Static,      // never moves
+    Dynamic,     // simulated
+    Kinematic    // moved by code; pushes dynamic bodies and characters
 };
 
-/**
- * Collision layer flags
- */
+// Bit flags; combine with | (e.g. CollisionLayer::Static | CollisionLayer::Dynamic)
 enum class CollisionLayer : uint16 {
+    None = 0,
     Default = 1 << 0,
     Static = 1 << 1,
     Dynamic = 1 << 2,
     Character = 1 << 3,
     Projectile = 1 << 4,
     Trigger = 1 << 5,
+    Kinematic = 1 << 6,
     All = 0xFFFF
 };
 
-/**
- * Collision shape descriptor
- */
+constexpr CollisionLayer operator|(CollisionLayer a, CollisionLayer b) {
+    return static_cast<CollisionLayer>(static_cast<uint16>(a) | static_cast<uint16>(b));
+}
+constexpr CollisionLayer operator&(CollisionLayer a, CollisionLayer b) {
+    return static_cast<CollisionLayer>(static_cast<uint16>(a) & static_cast<uint16>(b));
+}
+constexpr CollisionLayer operator~(CollisionLayer a) {
+    return static_cast<CollisionLayer>(static_cast<uint16>(~static_cast<uint16>(a)));
+}
+constexpr bool HasAny(CollisionLayer a, CollisionLayer b) {
+    return (static_cast<uint16>(a) & static_cast<uint16>(b)) != 0;
+}
+
 struct CollisionShapeDesc {
     CollisionShapeType type = CollisionShapeType::Box;
-    Math::Vector3 half_extents = {0.5f, 0.5f, 0.5f};  // For box
-    float32 radius = 0.5f;                             // For sphere, capsule
-    float32 height = 1.0f;                             // For capsule, cylinder, cone
-    Array<Math::Vector3> vertices;                     // For convex hull
-    Array<uint32> indices;                             // For triangle mesh
+    Math::Vector3 half_extents = {0.5f, 0.5f, 0.5f};  // box
+    float32 radius = 0.5f;                             // sphere, capsule, cylinder, cone
+    float32 height = 1.0f;                             // capsule (total), cylinder, cone
+    Array<Math::Vector3> vertices;                     // convex hull, triangle mesh
+    Array<uint32> indices;                             // triangle mesh
 };
 
-/**
- * Rigid body descriptor
- */
 struct RigidBodyDesc {
     RigidBodyType type = RigidBodyType::Dynamic;
     CollisionShapeDesc shape;
@@ -84,71 +97,73 @@ struct RigidBodyDesc {
     float32 angular_damping = 0.05f;
     CollisionLayer layer = CollisionLayer::Default;
     CollisionLayer mask = CollisionLayer::All;
-    bool is_trigger = false;
+    bool is_trigger = false;   // reports overlaps, no collision response
     void* user_data = nullptr;
 };
 
-/**
- * Ray cast result
- */
 struct RaycastResult {
     bool hit = false;
     Math::Vector3 point;
     Math::Vector3 normal;
     float32 distance = 0.0f;
+    float32 fraction = 1.0f;
+    RigidBody* body = nullptr;
+    CharacterController* character = nullptr;
     void* body_user_data = nullptr;
 };
 
-/**
- * Collision contact point
- */
+struct QueryFilter {
+    CollisionLayer mask = CollisionLayer::All;
+    bool include_triggers = false;
+    const RigidBody* ignore_body = nullptr;
+    const CharacterController* ignore_character = nullptr;
+};
+
 struct ContactPoint {
     Math::Vector3 position_world_on_a;
     Math::Vector3 position_world_on_b;
     Math::Vector3 normal_on_b;
-    float32 distance;
-    float32 impulse;
+    float32 distance = 0.0f;
+    float32 impulse = 0.0f;
 };
 
 /**
- * Collision callback interface
+ * Collision events, reported after each step. Arguments are the bodies' user data.
  */
 class ICollisionCallback {
 public:
     virtual ~ICollisionCallback() = default;
-    virtual void OnCollisionBegin(void* body_a, void* body_b, const ContactPoint& contact) = 0;
-    virtual void OnCollisionStay(void* body_a, void* body_b, const ContactPoint& contact) = 0;
-    virtual void OnCollisionEnd(void* body_a, void* body_b) = 0;
-    virtual void OnTriggerEnter(void* trigger, void* other) = 0;
-    virtual void OnTriggerExit(void* trigger, void* other) = 0;
+    virtual void OnCollisionBegin(void* /*a*/, void* /*b*/, const ContactPoint& /*contact*/) {}
+    virtual void OnCollisionStay(void* /*a*/, void* /*b*/, const ContactPoint& /*contact*/) {}
+    virtual void OnCollisionEnd(void* /*a*/, void* /*b*/) {}
+    virtual void OnTriggerEnter(void* /*trigger*/, void* /*other*/) {}
+    virtual void OnTriggerExit(void* /*trigger*/, void* /*other*/) {}
 };
 
-/**
- * Rigid Body wrapper
- */
 class RigidBody {
 public:
     RigidBody() = default;
     ~RigidBody();
 
+    RigidBody(const RigidBody&) = delete;
+    RigidBody& operator=(const RigidBody&) = delete;
+
     bool Create(btDiscreteDynamicsWorld* world, const RigidBodyDesc& desc);
     void Destroy();
 
-    // Transform
     Math::Transform GetTransform() const;
+    // Kinematic bodies: the new transform is reached during the next step (velocity is derived from it)
     void SetTransform(const Math::Transform& transform);
     Math::Vector3 GetPosition() const;
     void SetPosition(const Math::Vector3& position);
     Math::Quaternion GetRotation() const;
     void SetRotation(const Math::Quaternion& rotation);
 
-    // Velocity
     Math::Vector3 GetLinearVelocity() const;
     void SetLinearVelocity(const Math::Vector3& velocity);
     Math::Vector3 GetAngularVelocity() const;
     void SetAngularVelocity(const Math::Vector3& velocity);
 
-    // Forces
     void ApplyForce(const Math::Vector3& force);
     void ApplyForceAtPoint(const Math::Vector3& force, const Math::Vector3& point);
     void ApplyImpulse(const Math::Vector3& impulse);
@@ -156,24 +171,22 @@ public:
     void ApplyTorque(const Math::Vector3& torque);
     void ApplyTorqueImpulse(const Math::Vector3& torque);
 
-    // Properties
     float32 GetMass() const;
     void SetMass(float32 mass);
     void SetFriction(float32 friction);
     void SetRestitution(float32 restitution);
     void SetDamping(float32 linear, float32 angular);
 
-    // State
-    void SetKinematic(bool kinematic);
-    bool IsKinematic() const;
+    bool IsKinematic() const { return type_ == RigidBodyType::Kinematic; }
+    bool IsStatic() const { return type_ == RigidBodyType::Static; }
+    bool IsTrigger() const { return is_trigger_; }
     void SetActive(bool active);
     bool IsActive() const;
     void SetGravityEnabled(bool enabled);
 
-    // User data
+    CollisionLayer GetLayer() const { return layer_; }
     void SetUserData(void* data) { user_data_ = data; }
     void* GetUserData() const { return user_data_; }
-
     btRigidBody* GetBulletBody() const { return body_; }
 
 private:
@@ -181,106 +194,148 @@ private:
     btRigidBody* body_ = nullptr;
     btCollisionShape* shape_ = nullptr;
     btMotionState* motion_state_ = nullptr;
+    btTriangleMesh* triangle_mesh_ = nullptr;
     void* user_data_ = nullptr;
     RigidBodyType type_ = RigidBodyType::Dynamic;
+    CollisionLayer layer_ = CollisionLayer::Default;
+    bool is_trigger_ = false;
 };
 
 /**
- * Character Controller
- * Simplified kinematic character physics
+ * Kinematic capsule character (collide-and-slide).
+ * Deterministic for identical inputs and world state, so it can be re-simulated for
+ * client-side prediction. Position is the bottom of the capsule (the feet).
  */
+struct CharacterSettings {
+    float32 radius = 0.35f;
+    float32 height = 1.8f;
+    float32 step_height = 0.35f;
+    float32 max_slope_degrees = 46.0f;
+    float32 gravity = 20.0f;              // m/s^2, downwards
+    float32 skin_width = 0.01f;
+    float32 ground_snap_distance = 0.3f;  // keeps contact when walking down slopes and stairs
+    float32 crush_tolerance = 0.04f;      // remaining penetration that counts as crushed
+    CollisionLayer layer = CollisionLayer::Character;
+    CollisionLayer mask = CollisionLayer::All;   // what blocks the character (triggers never block)
+    void* user_data = nullptr;
+};
+
+struct CharacterState {
+    Math::Vector3 position;     // feet
+    Math::Vector3 velocity;
+    bool grounded = false;
+    Math::Vector3 ground_normal = Math::Vector3::Up;
+};
+
 class CharacterController {
 public:
     CharacterController() = default;
     ~CharacterController();
 
-    bool Create(btDiscreteDynamicsWorld* world, float32 radius, float32 height,
-                const Math::Vector3& position);
+    CharacterController(const CharacterController&) = delete;
+    CharacterController& operator=(const CharacterController&) = delete;
+
+    bool Create(btDiscreteDynamicsWorld* world, const CharacterSettings& settings, const Math::Vector3& feet_position);
     void Destroy();
 
-    void Move(const Math::Vector3& displacement, float32 delta_time);
-    void Jump(float32 force);
+    /**
+     * One simulation step. `wish_velocity` sets the horizontal velocity (y is ignored);
+     * `jump_speed` > 0 jumps when grounded. Gravity, stepping, sliding and ground snapping are applied.
+     */
+    void Move(const Math::Vector3& wish_velocity, float32 jump_speed, float32 dt);
 
-    Math::Vector3 GetPosition() const;
-    void SetPosition(const Math::Vector3& position);
+    // Moves by a displacement with collision but without gravity; returns the distance travelled
+    float32 MoveAndSlide(const Math::Vector3& displacement);
 
-    bool IsGrounded() const { return is_grounded_; }
-    Math::Vector3 GetVelocity() const { return velocity_; }
+    /**
+     * Pushes the capsule out of overlapping geometry (e.g. a kinematic wall moved into it).
+     * Returns false when it cannot be freed; IsCrushed() is then true until the next successful resolve.
+     */
+    bool ResolvePenetration();
+    bool IsCrushed() const { return crushed_; }
 
-    void SetStepHeight(float32 height) { step_height_ = height; }
-    void SetMaxSlope(float32 angle_degrees) { max_slope_ = angle_degrees; }
-    void SetGravity(float32 gravity) { gravity_ = gravity; }
+    const CharacterState& GetState() const { return state_; }
+    void SetState(const CharacterState& state);
+
+    Math::Vector3 GetPosition() const { return state_.position; }
+    void SetPosition(const Math::Vector3& feet_position);
+    Math::Vector3 GetVelocity() const { return state_.velocity; }
+    void SetVelocity(const Math::Vector3& velocity) { state_.velocity = velocity; }
+    bool IsGrounded() const { return state_.grounded; }
+    Math::Vector3 GetCenter() const;
+
+    const CharacterSettings& GetSettings() const { return settings_; }
+    void* GetUserData() const { return settings_.user_data; }
+    btCollisionObject* GetCollisionObject() const { return object_; }
 
 private:
-    void UpdateGrounded();
+    struct SweepHit {
+        bool hit = false;
+        float32 fraction = 1.0f;
+        Math::Vector3 normal;
+        Math::Vector3 point;
+    };
+
+    SweepHit Sweep(const Math::Vector3& from_feet, const Math::Vector3& to_feet) const;
+    Math::Vector3 SlideMove(const Math::Vector3& start, const Math::Vector3& displacement, Math::Vector3* velocity) const;
+    // Snaps feet down onto walkable ground within `distance`; contact_height receives the touched point's y
+    bool ProbeGround(Math::Vector3& feet, float32 distance, Math::Vector3& normal, float32* contact_height = nullptr) const;
+    bool IsWalkable(const Math::Vector3& normal) const;
+    void SyncObject();
 
     btDiscreteDynamicsWorld* world_ = nullptr;
-    btRigidBody* body_ = nullptr;
-    btCollisionShape* shape_ = nullptr;
-
-    Math::Vector3 velocity_;
-    float32 step_height_ = 0.35f;
-    float32 max_slope_ = 45.0f;
-    float32 gravity_ = 9.81f;
-    bool is_grounded_ = false;
+    btCollisionObject* object_ = nullptr;
+    btConvexShape* shape_ = nullptr;
+    CharacterSettings settings_;
+    CharacterState state_;
+    float32 min_ground_normal_y_ = 0.7f;
+    bool crushed_ = false;
 };
 
-/**
- * Physics World
- * Main physics simulation container
- */
 class PhysicsWorld {
 public:
     PhysicsWorld() = default;
     ~PhysicsWorld();
 
+    PhysicsWorld(const PhysicsWorld&) = delete;
+    PhysicsWorld& operator=(const PhysicsWorld&) = delete;
+
     bool Initialize(const Math::Vector3& gravity = {0, -9.81f, 0});
     void Shutdown();
+    bool IsInitialized() const { return dynamics_world_ != nullptr; }
 
-    // Simulation
-    void Step(float32 delta_time, int32 max_sub_steps = 10);
+    // Advances exactly `delta_time` (call from a fixed-step update)
+    void Step(float32 delta_time);
 
-    // Rigid bodies
     SharedPtr<RigidBody> CreateRigidBody(const RigidBodyDesc& desc);
-    void DestroyRigidBody(SharedPtr<RigidBody> body);
+    void DestroyRigidBody(const SharedPtr<RigidBody>& body);
 
-    // Character controllers
-    SharedPtr<CharacterController> CreateCharacterController(float32 radius, float32 height,
-                                                               const Math::Vector3& position);
-    void DestroyCharacterController(SharedPtr<CharacterController> controller);
+    SharedPtr<CharacterController> CreateCharacterController(const CharacterSettings& settings,
+                                                             const Math::Vector3& feet_position);
+    void DestroyCharacterController(const SharedPtr<CharacterController>& controller);
 
-    // Raycasting
-    RaycastResult Raycast(const Math::Vector3& from, const Math::Vector3& to,
-                          CollisionLayer mask = CollisionLayer::All) const;
+    // Queries (triggers are skipped unless the filter includes them)
+    RaycastResult Raycast(const Math::Vector3& from, const Math::Vector3& to, const QueryFilter& filter = {}) const;
     Array<RaycastResult> RaycastAll(const Math::Vector3& from, const Math::Vector3& to,
-                                    CollisionLayer mask = CollisionLayer::All) const;
-
-    // Sphere cast
-    RaycastResult SphereCast(const Math::Vector3& from, const Math::Vector3& to,
-                             float32 radius, CollisionLayer mask = CollisionLayer::All) const;
-
-    // Overlap tests
-    Array<void*> OverlapSphere(const Math::Vector3& center, float32 radius,
-                               CollisionLayer mask = CollisionLayer::All) const;
+                                    const QueryFilter& filter = {}) const;   // sorted by distance
+    RaycastResult SphereCast(const Math::Vector3& from, const Math::Vector3& to, float32 radius,
+                             const QueryFilter& filter = {}) const;
+    Array<void*> OverlapSphere(const Math::Vector3& center, float32 radius, const QueryFilter& filter = {}) const;
     Array<void*> OverlapBox(const Math::Vector3& center, const Math::Vector3& half_extents,
-                            const Math::Quaternion& rotation,
-                            CollisionLayer mask = CollisionLayer::All) const;
+                            const Math::Quaternion& rotation, const QueryFilter& filter = {}) const;
 
-    // Settings
     void SetGravity(const Math::Vector3& gravity);
     Math::Vector3 GetGravity() const;
 
-    // Callbacks
     void SetCollisionCallback(ICollisionCallback* callback) { collision_callback_ = callback; }
 
-    // Debug
-    void EnableDebugDraw(bool enable) { debug_draw_enabled_ = enable; }
-    bool IsDebugDrawEnabled() const { return debug_draw_enabled_; }
-
+    uint32 GetRigidBodyCount() const { return static_cast<uint32>(rigid_bodies_.size()); }
     btDiscreteDynamicsWorld* GetBulletWorld() const { return dynamics_world_; }
 
 private:
     void ProcessCollisions();
+    Array<void*> Overlap(btCollisionShape& shape, const Math::Vector3& center, const Math::Quaternion& rotation,
+                         const QueryFilter& filter) const;
 
     btDefaultCollisionConfiguration* collision_config_ = nullptr;
     btCollisionDispatcher* dispatcher_ = nullptr;
@@ -292,7 +347,7 @@ private:
     Array<SharedPtr<CharacterController>> character_controllers_;
 
     ICollisionCallback* collision_callback_ = nullptr;
-    bool debug_draw_enabled_ = false;
+    std::set<std::pair<const btCollisionObject*, const btCollisionObject*>> active_pairs_;
 };
 
 } // namespace DRX::Physics

@@ -21,6 +21,8 @@ add_executable(DRXTests
     UnitTests/TestCore.cpp
     UnitTests/TestSystems.cpp
     UnitTests/TestRendering.cpp
+    UnitTests/TestPhysics.cpp
+    UnitTests/TestGameplay.cpp
 )
 
 target_link_libraries(DRXTests PRIVATE

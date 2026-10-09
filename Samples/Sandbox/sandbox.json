@@ -1,10 +1,26 @@
 {
     // Values for the engine sandbox; edit while running, they reload automatically
+    "sandbox": {
+        "start_mode": "play"
+    },
     "camera": {
         "fov_degrees": 90,
         "move_speed": 6.0,
         "fast_multiplier": 4.0,
         "mouse_sensitivity": 0.12
+    },
+    "player": {
+        "walk_speed": 5.5,
+        "run_speed": 8.0,
+        "jump_height": 1.0
+    },
+    "weapon": {
+        "damage": 25,
+        "fire_rate": 10,
+        "spread": 0.4,
+        "recoil": 0.5,
+        "magazine": 30,
+        "reserve": 120
     },
     "environment": {
         "sun_intensity": 3.0,
