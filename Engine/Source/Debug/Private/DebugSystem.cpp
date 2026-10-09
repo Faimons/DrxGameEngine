@@ -238,343 +238,188 @@ void Profiler::ExportToFile(const String& path) const {
 // DebugRenderer
 // ============================================================================
 
+namespace {
+constexpr float32 kPi = 3.14159265358979323846f;
+
+// Any unit vector perpendicular to `dir`
+Math::Vector3 Perpendicular(const Math::Vector3& dir) {
+    Math::Vector3 p = Math::Vector3::Cross(dir, Math::Vector3::Up);
+    if (p.LengthSquared() < 1e-6f) p = Math::Vector3::Cross(dir, Math::Vector3::Right);
+    return p.Normalized();
+}
+} // namespace
+
 DebugRenderer& DebugRenderer::Instance() {
     static DebugRenderer instance;
     return instance;
 }
 
-void DebugRenderer::Initialize() {
-    // Initialize rendering resources
-    // Create line vertex buffer, debug pipeline, etc.
-}
-
-void DebugRenderer::Shutdown() {
-    commands_.clear();
-    persistent_commands_.clear();
-}
-
-void DebugRenderer::Render(const Math::Matrix4& view_projection) {
-    if (!enabled_) return;
-
-    // Update persistent command durations
-    // Build line geometry from commands
-    // Render debug primitives
-
-    BuildLineGeometry();
-
-    // Clear immediate commands after rendering
-    commands_.clear();
-}
-
 void DebugRenderer::Clear() {
-    commands_.clear();
-    persistent_commands_.clear();
+    lines_.clear();
+    labels_.clear();
+}
+
+void DebugRenderer::Advance(float32 delta_time) {
+    auto expired = [delta_time](auto& item) {
+        item.remaining -= delta_time;
+        return item.remaining <= 0.0f;
+    };
+    lines_.erase(std::remove_if(lines_.begin(), lines_.end(), expired), lines_.end());
+    labels_.erase(std::remove_if(labels_.begin(), labels_.end(), expired), labels_.end());
+}
+
+bool DebugRenderer::ProjectToScreen(const Math::Matrix4& view_projection, const Math::Vector3& position,
+                                    float32 screen_width, float32 screen_height, Math::Vector2& out) {
+    const Math::Vector4 clip = view_projection * Math::Vector4(position, 1.0f);
+    if (clip.w <= 1e-5f) return false;
+    const float32 x = clip.x / clip.w;
+    const float32 y = clip.y / clip.w;
+    // Vulkan clip space: y points down, so NDC maps directly to top-left screen coordinates
+    out = Math::Vector2((x * 0.5f + 0.5f) * screen_width, (y * 0.5f + 0.5f) * screen_height);
+    return true;
 }
 
 void DebugRenderer::DrawLine(const Math::Vector3& start, const Math::Vector3& end,
-                              const Math::Vector4& color, float32 duration,
-                              bool depth_test) {
-    DebugDrawCommand cmd;
-    cmd.type = DebugDrawType::Line;
-    cmd.position = start;
-    cmd.size = end;  // Using size to store end point
-    cmd.color = color;
-    cmd.duration = duration;
-    cmd.depth_test = depth_test;
-
-    if (duration > 0) {
-        persistent_commands_.push_back(cmd);
-    } else {
-        commands_.push_back(cmd);
-    }
-}
-
-void DebugRenderer::DrawBox(const Math::Vector3& center, const Math::Vector3& size,
-                             const Math::Vector4& color, float32 duration,
-                             bool depth_test) {
-    DebugDrawCommand cmd;
-    cmd.type = DebugDrawType::Box;
-    cmd.position = center;
-    cmd.size = size;
-    cmd.color = color;
-    cmd.duration = duration;
-    cmd.depth_test = depth_test;
-
-    if (duration > 0) {
-        persistent_commands_.push_back(cmd);
-    } else {
-        commands_.push_back(cmd);
-    }
+                             const Math::Vector4& color, float32 duration) {
+    if (!enabled_) return;
+    lines_.push_back({start, end, color, duration});
 }
 
 void DebugRenderer::DrawWireBox(const Math::Vector3& center, const Math::Vector3& size,
-                                 const Math::Quaternion& rotation,
-                                 const Math::Vector4& color, float32 duration,
-                                 bool depth_test) {
-    // Draw 12 lines for wireframe box
-    Math::Vector3 half = size * 0.5f;
-
-    // 8 corners
-    Math::Vector3 corners[8] = {
-        center + Math::Vector3(-half.x, -half.y, -half.z),
-        center + Math::Vector3( half.x, -half.y, -half.z),
-        center + Math::Vector3( half.x,  half.y, -half.z),
-        center + Math::Vector3(-half.x,  half.y, -half.z),
-        center + Math::Vector3(-half.x, -half.y,  half.z),
-        center + Math::Vector3( half.x, -half.y,  half.z),
-        center + Math::Vector3( half.x,  half.y,  half.z),
-        center + Math::Vector3(-half.x,  half.y,  half.z)
-    };
-
-    // Apply rotation to corners
+                                const Math::Quaternion& rotation, const Math::Vector4& color, float32 duration) {
+    const Math::Vector3 half = size * 0.5f;
+    Math::Vector3 corners[8];
     for (int i = 0; i < 8; ++i) {
-        Math::Vector3 local = corners[i] - center;
+        const Math::Vector3 local((i & 1) ? half.x : -half.x, (i & 2) ? half.y : -half.y, (i & 4) ? half.z : -half.z);
         corners[i] = center + rotation.Rotate(local);
     }
-
-    // Bottom face
-    DrawLine(corners[0], corners[1], color, duration, depth_test);
-    DrawLine(corners[1], corners[2], color, duration, depth_test);
-    DrawLine(corners[2], corners[3], color, duration, depth_test);
-    DrawLine(corners[3], corners[0], color, duration, depth_test);
-
-    // Top face
-    DrawLine(corners[4], corners[5], color, duration, depth_test);
-    DrawLine(corners[5], corners[6], color, duration, depth_test);
-    DrawLine(corners[6], corners[7], color, duration, depth_test);
-    DrawLine(corners[7], corners[4], color, duration, depth_test);
-
-    // Vertical edges
-    DrawLine(corners[0], corners[4], color, duration, depth_test);
-    DrawLine(corners[1], corners[5], color, duration, depth_test);
-    DrawLine(corners[2], corners[6], color, duration, depth_test);
-    DrawLine(corners[3], corners[7], color, duration, depth_test);
-}
-
-void DebugRenderer::DrawSphere(const Math::Vector3& center, float32 radius,
-                                const Math::Vector4& color, float32 duration,
-                                bool depth_test) {
-    DebugDrawCommand cmd;
-    cmd.type = DebugDrawType::Sphere;
-    cmd.position = center;
-    cmd.size = Math::Vector3(radius, radius, radius);
-    cmd.color = color;
-    cmd.duration = duration;
-    cmd.depth_test = depth_test;
-
-    if (duration > 0) {
-        persistent_commands_.push_back(cmd);
-    } else {
-        commands_.push_back(cmd);
+    static constexpr int kEdges[12][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {0, 2}, {1, 3},
+                                          {4, 6}, {5, 7}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+    for (const auto& edge : kEdges) {
+        DrawLine(corners[edge[0]], corners[edge[1]], color, duration);
     }
 }
 
 void DebugRenderer::DrawWireSphere(const Math::Vector3& center, float32 radius,
-                                    const Math::Vector4& color, float32 duration,
-                                    bool depth_test) {
-    const int segments = 24;
-    const float pi = 3.14159265359f;
-
-    // Draw 3 circles for XY, XZ, YZ planes
+                                   const Math::Vector4& color, float32 duration) {
+    constexpr int kSegments = 24;
     for (int plane = 0; plane < 3; ++plane) {
-        for (int i = 0; i < segments; ++i) {
-            float angle1 = (i / static_cast<float>(segments)) * 2.0f * pi;
-            float angle2 = ((i + 1) / static_cast<float>(segments)) * 2.0f * pi;
-
-            Math::Vector3 p1, p2;
-
-            switch (plane) {
-                case 0: // XY plane
-                    p1 = center + Math::Vector3(cos(angle1) * radius, sin(angle1) * radius, 0);
-                    p2 = center + Math::Vector3(cos(angle2) * radius, sin(angle2) * radius, 0);
-                    break;
-                case 1: // XZ plane
-                    p1 = center + Math::Vector3(cos(angle1) * radius, 0, sin(angle1) * radius);
-                    p2 = center + Math::Vector3(cos(angle2) * radius, 0, sin(angle2) * radius);
-                    break;
-                case 2: // YZ plane
-                    p1 = center + Math::Vector3(0, cos(angle1) * radius, sin(angle1) * radius);
-                    p2 = center + Math::Vector3(0, cos(angle2) * radius, sin(angle2) * radius);
-                    break;
-            }
-
-            DrawLine(p1, p2, color, duration, depth_test);
+        for (int i = 0; i < kSegments; ++i) {
+            const float32 a1 = static_cast<float32>(i) / kSegments * 2.0f * kPi;
+            const float32 a2 = static_cast<float32>(i + 1) / kSegments * 2.0f * kPi;
+            auto point = [&](float32 a) {
+                const float32 c = std::cos(a) * radius, s = std::sin(a) * radius;
+                switch (plane) {
+                    case 0: return center + Math::Vector3(c, s, 0);
+                    case 1: return center + Math::Vector3(c, 0, s);
+                    default: return center + Math::Vector3(0, c, s);
+                }
+            };
+            DrawLine(point(a1), point(a2), color, duration);
         }
     }
 }
 
-void DebugRenderer::DrawCapsule(const Math::Vector3& start, const Math::Vector3& end,
-                                 float32 radius, const Math::Vector4& color,
-                                 float32 duration, bool depth_test) {
-    DebugDrawCommand cmd;
-    cmd.type = DebugDrawType::Capsule;
-    cmd.position = start;
-    cmd.size = end;  // Store end point
-    cmd.color = color;
-    cmd.duration = duration;
-    cmd.depth_test = depth_test;
+void DebugRenderer::DrawCapsule(const Math::Vector3& start, const Math::Vector3& end, float32 radius,
+                                const Math::Vector4& color, float32 duration) {
+    DrawWireSphere(start, radius, color, duration);
+    DrawWireSphere(end, radius, color, duration);
 
-    // Draw cylinder body
-    DrawWireSphere(start, radius, color, duration, depth_test);
-    DrawWireSphere(end, radius, color, duration, depth_test);
-
-    // Draw connecting lines
-    Math::Vector3 dir = (end - start).Normalized();
-    Math::Vector3 right = Math::Vector3::Cross(dir, Math::Vector3::Up).Normalized() * radius;
-    Math::Vector3 forward = Math::Vector3::Cross(right, dir).Normalized() * radius;
-
-    DrawLine(start + right, end + right, color, duration, depth_test);
-    DrawLine(start - right, end - right, color, duration, depth_test);
-    DrawLine(start + forward, end + forward, color, duration, depth_test);
-    DrawLine(start - forward, end - forward, color, duration, depth_test);
+    const Math::Vector3 axis = end - start;
+    const Math::Vector3 dir = axis.LengthSquared() > 1e-10f ? axis.Normalized() : Math::Vector3::Up;
+    const Math::Vector3 right = Perpendicular(dir) * radius;
+    const Math::Vector3 forward = Math::Vector3::Cross(right, dir).Normalized() * radius;
+    DrawLine(start + right, end + right, color, duration);
+    DrawLine(start - right, end - right, color, duration);
+    DrawLine(start + forward, end + forward, color, duration);
+    DrawLine(start - forward, end - forward, color, duration);
 }
 
 void DebugRenderer::DrawArrow(const Math::Vector3& start, const Math::Vector3& end,
-                               const Math::Vector4& color, float32 duration,
-                               bool depth_test) {
-    DrawLine(start, end, color, duration, depth_test);
+                              const Math::Vector4& color, float32 duration) {
+    DrawLine(start, end, color, duration);
+    const float32 length = (end - start).Length();
+    if (length < 1e-5f) return;
 
-    Math::Vector3 dir = (end - start).Normalized();
-    float32 length = (end - start).Length();
-    float32 head_size = length * 0.1f;
-
-    Math::Vector3 right = Math::Vector3::Cross(dir, Math::Vector3::Up).Normalized();
-    if (right.LengthSquared() < 0.001f) {
-        right = Math::Vector3::Cross(dir, Math::Vector3::Right).Normalized();
-    }
-    Math::Vector3 up = Math::Vector3::Cross(right, dir).Normalized();
-
-    Math::Vector3 head_base = end - dir * head_size;
-
-    DrawLine(end, head_base + right * head_size * 0.5f, color, duration, depth_test);
-    DrawLine(end, head_base - right * head_size * 0.5f, color, duration, depth_test);
-    DrawLine(end, head_base + up * head_size * 0.5f, color, duration, depth_test);
-    DrawLine(end, head_base - up * head_size * 0.5f, color, duration, depth_test);
+    const Math::Vector3 dir = (end - start) / length;
+    const Math::Vector3 right = Perpendicular(dir);
+    const Math::Vector3 up = Math::Vector3::Cross(right, dir).Normalized();
+    const float32 head = length * 0.1f;
+    const Math::Vector3 base = end - dir * head;
+    DrawLine(end, base + right * head * 0.5f, color, duration);
+    DrawLine(end, base - right * head * 0.5f, color, duration);
+    DrawLine(end, base + up * head * 0.5f, color, duration);
+    DrawLine(end, base - up * head * 0.5f, color, duration);
 }
 
-void DebugRenderer::DrawFrustum(const Math::Matrix4& view_projection,
-                                 const Math::Vector4& color, float32 duration) {
-    Math::Matrix4 inv_vp = view_projection.Inverse();
-
-    // NDC corners
-    Math::Vector3 ndc_corners[8] = {
-        {-1, -1, 0}, {1, -1, 0}, {1, 1, 0}, {-1, 1, 0},  // Near
-        {-1, -1, 1}, {1, -1, 1}, {1, 1, 1}, {-1, 1, 1}   // Far
-    };
-
-    Math::Vector3 world_corners[8];
+void DebugRenderer::DrawFrustum(const Math::Matrix4& view_projection, const Math::Vector4& color, float32 duration) {
+    const Math::Matrix4 inv_vp = view_projection.Inverse();
+    // Vulkan NDC: depth 0 (near) to 1 (far)
+    const Math::Vector3 ndc[8] = {{-1, -1, 0}, {1, -1, 0}, {1, 1, 0}, {-1, 1, 0},
+                                  {-1, -1, 1}, {1, -1, 1}, {1, 1, 1}, {-1, 1, 1}};
+    Math::Vector3 world[8];
     for (int i = 0; i < 8; ++i) {
-        Math::Vector4 world = inv_vp * Math::Vector4(ndc_corners[i], 1.0f);
-        world_corners[i] = Math::Vector3(world.x, world.y, world.z) / world.w;
+        const Math::Vector4 p = inv_vp * Math::Vector4(ndc[i], 1.0f);
+        world[i] = Math::Vector3(p.x, p.y, p.z) / p.w;
     }
-
-    // Draw near plane
     for (int i = 0; i < 4; ++i) {
-        DrawLine(world_corners[i], world_corners[(i + 1) % 4], color, duration, false);
-    }
-
-    // Draw far plane
-    for (int i = 0; i < 4; ++i) {
-        DrawLine(world_corners[4 + i], world_corners[4 + (i + 1) % 4], color, duration, false);
-    }
-
-    // Draw edges
-    for (int i = 0; i < 4; ++i) {
-        DrawLine(world_corners[i], world_corners[4 + i], color, duration, false);
+        DrawLine(world[i], world[(i + 1) % 4], color, duration);
+        DrawLine(world[4 + i], world[4 + (i + 1) % 4], color, duration);
+        DrawLine(world[i], world[4 + i], color, duration);
     }
 }
 
 void DebugRenderer::DrawGrid(const Math::Vector3& center, float32 size, uint32 divisions,
-                              const Math::Vector4& color, float32 duration) {
-    float32 step = size / divisions;
-    float32 half = size * 0.5f;
-
+                             const Math::Vector4& color, float32 duration) {
+    divisions = std::max(1u, divisions);
+    const float32 step = size / static_cast<float32>(divisions);
+    const float32 half = size * 0.5f;
     for (uint32 i = 0; i <= divisions; ++i) {
-        float32 offset = -half + i * step;
-
-        // X lines
-        DrawLine(
-            center + Math::Vector3(-half, 0, offset),
-            center + Math::Vector3(half, 0, offset),
-            color, duration, false
-        );
-
-        // Z lines
-        DrawLine(
-            center + Math::Vector3(offset, 0, -half),
-            center + Math::Vector3(offset, 0, half),
-            color, duration, false
-        );
+        const float32 offset = -half + static_cast<float32>(i) * step;
+        DrawLine(center + Math::Vector3(-half, 0, offset), center + Math::Vector3(half, 0, offset), color, duration);
+        DrawLine(center + Math::Vector3(offset, 0, -half), center + Math::Vector3(offset, 0, half), color, duration);
     }
 }
 
 void DebugRenderer::DrawAxis(const Math::Vector3& position, float32 size, float32 duration) {
-    DrawArrow(position, position + Math::Vector3(size, 0, 0), {1, 0, 0, 1}, duration, false);
-    DrawArrow(position, position + Math::Vector3(0, size, 0), {0, 1, 0, 1}, duration, false);
-    DrawArrow(position, position + Math::Vector3(0, 0, size), {0, 0, 1, 1}, duration, false);
+    DrawArrow(position, position + Math::Vector3(size, 0, 0), {1, 0, 0, 1}, duration);
+    DrawArrow(position, position + Math::Vector3(0, size, 0), {0, 1, 0, 1}, duration);
+    DrawArrow(position, position + Math::Vector3(0, 0, size), {0, 0, 1, 1}, duration);
 }
 
 void DebugRenderer::DrawText(const Math::Vector3& position, const String& text,
-                              const Math::Vector4& color, float32 duration) {
-    DebugDrawCommand cmd;
-    cmd.type = DebugDrawType::Text;
-    cmd.position = position;
-    cmd.text = text;
-    cmd.color = color;
-    cmd.duration = duration;
-    cmd.depth_test = false;
-
-    if (duration > 0) {
-        persistent_commands_.push_back(cmd);
-    } else {
-        commands_.push_back(cmd);
-    }
+                             const Math::Vector4& color, float32 duration) {
+    if (!enabled_) return;
+    labels_.push_back({position, text, color, duration});
 }
 
-void DebugRenderer::DrawRay(const Math::Vector3& origin, const Math::Vector3& direction,
-                             float32 length, const Math::Vector4& color, float32 duration) {
-    DrawArrow(origin, origin + direction * length, color, duration, true);
+void DebugRenderer::DrawRay(const Math::Vector3& origin, const Math::Vector3& direction, float32 length,
+                            const Math::Vector4& color, float32 duration) {
+    DrawArrow(origin, origin + direction * length, color, duration);
 }
 
-void DebugRenderer::DrawHitPoint(const Math::Vector3& point, const Math::Vector3& normal,
-                                  float32 duration) {
-    DrawWireSphere(point, 0.05f, {1, 0, 0, 1}, duration, false);
-    DrawArrow(point, point + normal * 0.3f, {0, 1, 0, 1}, duration, false);
+void DebugRenderer::DrawHitPoint(const Math::Vector3& point, const Math::Vector3& normal, float32 duration) {
+    DrawWireSphere(point, 0.05f, {1, 0, 0, 1}, duration);
+    DrawArrow(point, point + normal * 0.3f, {0, 1, 0, 1}, duration);
 }
 
 void DebugRenderer::DrawCollider(const Math::Vector3& position, const Math::Quaternion& rotation,
-                                  int32 shape_type, const Math::Vector3& size, bool is_trigger) {
-    Math::Vector4 color = is_trigger ? Math::Vector4(0, 1, 0, 0.5f) : Math::Vector4(0, 1, 1, 0.5f);
-
-    switch (shape_type) {
-        case 0: // Box
-            DrawWireBox(position, size, rotation, color, 0, true);
+                                 ColliderShape shape, const Math::Vector3& size, bool is_trigger) {
+    const Math::Vector4 color = is_trigger ? Math::Vector4(0, 1, 0, 0.6f) : Math::Vector4(0, 1, 1, 0.6f);
+    switch (shape) {
+        case ColliderShape::Box:
+            DrawWireBox(position, size, rotation, color);
             break;
-        case 1: // Sphere
-            DrawWireSphere(position, size.x, color, 0, true);
+        case ColliderShape::Sphere:
+            DrawWireSphere(position, size.x, color);
             break;
-        case 2: // Capsule
-            DrawCapsule(position - Math::Vector3(0, size.y * 0.5f, 0),
-                       position + Math::Vector3(0, size.y * 0.5f, 0),
-                       size.x, color, 0, true);
+        case ColliderShape::Capsule: {
+            const float32 half_segment = std::max(0.0f, size.y * 0.5f - size.x);
+            const Math::Vector3 axis = rotation.Rotate(Math::Vector3(0, half_segment, 0));
+            DrawCapsule(position - axis, position + axis, size.x, color);
             break;
+        }
     }
-}
-
-void DebugRenderer::UpdateDurations(float32 delta_time) {
-    persistent_commands_.erase(
-        std::remove_if(persistent_commands_.begin(), persistent_commands_.end(),
-            [delta_time](DebugDrawCommand& cmd) {
-                cmd.duration -= delta_time;
-                return cmd.duration <= 0;
-            }),
-        persistent_commands_.end()
-    );
-}
-
-void DebugRenderer::BuildLineGeometry() {
-    // Build vertex data for all line commands
-    // Upload to GPU buffer for rendering
 }
 
 // ============================================================================
@@ -815,7 +660,7 @@ void Console::Cmd_Help(const Array<String>& args) {
     }
 }
 
-void Console::Cmd_ListCVars(const Array<String>& args) {
+void Console::Cmd_ListCVars(const Array<String>& /*args*/) {
     Print("Console Variables:");
     for (const auto& [name, cvar] : cvars_) {
         Print("  " + name + " = " + cvar->GetString() + " (" + cvar->GetDescription() + ")");
@@ -859,13 +704,8 @@ void Console::Cmd_Exec(const Array<String>& args) {
     ExecuteFile(args[0]);
 }
 
-void Console::Cmd_Clear(const Array<String>& args) {
+void Console::Cmd_Clear(const Array<String>& /*args*/) {
     ClearOutput();
-}
-
-void Console::Cmd_Quit(const Array<String>& args) {
-    Print("Quitting...");
-    // Signal engine to quit
 }
 
 void Console::RegisterBuiltInCommands() {
@@ -881,8 +721,6 @@ void Console::RegisterBuiltInCommands() {
                     "Execute a config file");
     RegisterCommand("clear", [this](const Array<String>& args) { Cmd_Clear(args); },
                     "Clear console output");
-    RegisterCommand("quit", [this](const Array<String>& args) { Cmd_Quit(args); },
-                    "Quit the application");
 }
 
 Array<String> Console::ParseCommand(const String& command) const {

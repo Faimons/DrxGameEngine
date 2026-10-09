@@ -3,13 +3,14 @@
  * Graybox room, procedural props, particles, debug lines, HUD and a free-fly camera.
  *
  * Controls: hold right mouse to look, WASD move, Space/Ctrl up/down, Shift fast,
- *           G toggle debug lines, F11 fullscreen, F12 screenshot, Esc quit
+ *           left mouse shot sound, H alarm, G toggle debug lines, F11 fullscreen, F12 screenshot, Esc quit
  */
 
 #include "Runtime/Public/Application.h"
 #include "Renderer/Public/MeshBuilder.h"
 #include "Procedural/Public/ProceduralMesh.h"
 #include "Particles/Public/ParticleSystem.h"
+#include "Audio/Public/SoundSynth.h"
 #include "Core/Public/Log.h"
 
 #include <algorithm>
@@ -58,6 +59,10 @@ protected:
                                                                {0.7f, 0.35f, 0.1f, 1.0f}, {0.5f, 0.25f, 0.08f, 1.0f});
         accent_texture_ = renderer.CreateTexture(256, 256, accent.data(), true, true, "Accent");
 
+        Audio::AudioSystem& audio = Audio::AudioSystem::Instance();
+        shot_sound_ = audio.CreateClip("synth:gunshot", Audio::Synth::Gunshot());
+        alarm_sound_ = audio.CreateClip("synth:alarm", Audio::Synth::Alarm(2.5f));
+
         BuildRoom();
         BuildProps();
         BuildParticles();
@@ -83,6 +88,12 @@ protected:
         Input::InputSystem& input = GetInput();
         if (input.IsKeyPressed(Input::KeyCode::Escape)) RequestQuit();
         if (input.IsKeyPressed(Input::KeyCode::G)) show_debug_ = !show_debug_;
+        if (input.IsMouseButtonPressed(Input::MouseButton::Left)) {
+            Audio::AudioSystem::Instance().PlayOneShot2D(shot_sound_, 0.8f);
+        }
+        if (input.IsKeyPressed(Input::KeyCode::H)) {
+            Audio::AudioSystem::Instance().PlayOneShot(alarm_sound_, Vector3(0.0f, 3.5f, -5.5f));
+        }
 
         const bool look = input.IsMouseButtonDown(Input::MouseButton::Right);
         if (look != IsMouseCaptured()) SetMouseCaptured(look);
@@ -146,7 +157,7 @@ protected:
         ui.DrawLine({w * 0.5f, h * 0.5f - 8}, {w * 0.5f, h * 0.5f - 3}, cross, 2.0f);
         ui.DrawLine({w * 0.5f, h * 0.5f + 3}, {w * 0.5f, h * 0.5f + 8}, cross, 2.0f);
 
-        const String help = "RMB look   WASD move   Space/Ctrl up/down   Shift fast   G debug   F12 screenshot";
+        const String help = "RMB look   WASD move   Space/Ctrl up/down   Shift fast   LMB shot   H alarm   G debug   F12 screenshot";
         ui.DrawText(help, (w - ui.GetTextWidth(help)) * 0.5f, h - 30, {1, 1, 1, 0.7f});
     }
 
@@ -302,6 +313,8 @@ private:
     TextureHandle grid_texture_;
     TextureHandle accent_texture_;
     SharedPtr<Particles::ParticleSystem> fire_;
+    SharedPtr<Audio::AudioClip> shot_sound_;
+    SharedPtr<Audio::AudioClip> alarm_sound_;
 
     Vector3 position_{0.0f, 1.7f, 10.0f};
     float32 yaw_ = 0.0f;

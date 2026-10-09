@@ -6,6 +6,7 @@
 #pragma once
 
 #include "Core/Public/CoreTypes.h"
+#include "Core/Public/Math/Vector2.h"
 #include "Core/Public/Math/Vector3.h"
 #include "Core/Public/Math/Vector4.h"
 #include "Core/Public/Math/Matrix4.h"
@@ -153,115 +154,74 @@ private:
 #define DRX_PROFILE_FUNCTION() DRX_PROFILE_SCOPE(__FUNCTION__)
 
 /**
- * Debug draw types
- */
-enum class DebugDrawType : uint32 {
-    Line,
-    Box,
-    Sphere,
-    Capsule,
-    Arrow,
-    Text,
-    Frustum,
-    Grid,
-    Axis
-};
-
-/**
- * Debug draw command
- */
-struct DebugDrawCommand {
-    DebugDrawType type;
-    Math::Vector3 position;
-    Math::Vector3 size;
-    Math::Quaternion rotation;
-    Math::Vector4 color;
-    float32 duration;
-    bool depth_test;
-    String text;
-};
-
-/**
- * Debug renderer - draws debug shapes
+ * Debug renderer - immediate-mode debug shapes and world-space labels.
+ * Shapes are decomposed into lines; duration 0 draws for one frame.
+ * The application submits them each frame (lines to the scene renderer, labels to the UI).
  */
 class DebugRenderer {
 public:
     static DebugRenderer& Instance();
 
-    void Initialize();
-    void Shutdown();
-    void Render(const Math::Matrix4& view_projection);
     void Clear();
 
-    // Draw functions
     void DrawLine(const Math::Vector3& start, const Math::Vector3& end,
-                  const Math::Vector4& color = {1, 1, 1, 1}, float32 duration = 0,
-                  bool depth_test = true);
-
-    void DrawBox(const Math::Vector3& center, const Math::Vector3& size,
-                 const Math::Vector4& color = {1, 1, 1, 1}, float32 duration = 0,
-                 bool depth_test = true);
-
+                  const Math::Vector4& color = {1, 1, 1, 1}, float32 duration = 0);
     void DrawWireBox(const Math::Vector3& center, const Math::Vector3& size,
                      const Math::Quaternion& rotation = {},
-                     const Math::Vector4& color = {1, 1, 1, 1}, float32 duration = 0,
-                     bool depth_test = true);
-
-    void DrawSphere(const Math::Vector3& center, float32 radius,
-                    const Math::Vector4& color = {1, 1, 1, 1}, float32 duration = 0,
-                    bool depth_test = true);
-
+                     const Math::Vector4& color = {1, 1, 1, 1}, float32 duration = 0);
     void DrawWireSphere(const Math::Vector3& center, float32 radius,
-                        const Math::Vector4& color = {1, 1, 1, 1}, float32 duration = 0,
-                        bool depth_test = true);
-
+                        const Math::Vector4& color = {1, 1, 1, 1}, float32 duration = 0);
     void DrawCapsule(const Math::Vector3& start, const Math::Vector3& end, float32 radius,
-                     const Math::Vector4& color = {1, 1, 1, 1}, float32 duration = 0,
-                     bool depth_test = true);
-
+                     const Math::Vector4& color = {1, 1, 1, 1}, float32 duration = 0);
     void DrawArrow(const Math::Vector3& start, const Math::Vector3& end,
-                   const Math::Vector4& color = {1, 1, 1, 1}, float32 duration = 0,
-                   bool depth_test = true);
-
+                   const Math::Vector4& color = {1, 1, 1, 1}, float32 duration = 0);
     void DrawFrustum(const Math::Matrix4& view_projection,
                      const Math::Vector4& color = {1, 1, 1, 1}, float32 duration = 0);
-
     void DrawGrid(const Math::Vector3& center, float32 size, uint32 divisions,
                   const Math::Vector4& color = {0.5f, 0.5f, 0.5f, 1}, float32 duration = 0);
-
     void DrawAxis(const Math::Vector3& position, float32 size = 1.0f, float32 duration = 0);
-
     void DrawText(const Math::Vector3& position, const String& text,
                   const Math::Vector4& color = {1, 1, 1, 1}, float32 duration = 0);
-
-    // Ray/collision visualization
     void DrawRay(const Math::Vector3& origin, const Math::Vector3& direction, float32 length,
                  const Math::Vector4& color = {1, 1, 0, 1}, float32 duration = 0);
+    void DrawHitPoint(const Math::Vector3& point, const Math::Vector3& normal, float32 duration = 0);
 
-    void DrawHitPoint(const Math::Vector3& point, const Math::Vector3& normal,
-                      float32 duration = 0);
-
-    // Physics debug
+    enum class ColliderShape { Box, Sphere, Capsule };
+    // Box: size = full extents; Sphere: size.x = radius; Capsule: size.x = radius, size.y = height
     void DrawCollider(const Math::Vector3& position, const Math::Quaternion& rotation,
-                      int32 shape_type, const Math::Vector3& size, bool is_trigger = false);
+                      ColliderShape shape, const Math::Vector3& size, bool is_trigger = false);
 
-    // Settings
     void SetEnabled(bool enabled) { enabled_ = enabled; }
     bool IsEnabled() const { return enabled_; }
+
+    struct Line {
+        Math::Vector3 start;
+        Math::Vector3 end;
+        Math::Vector4 color;
+        float32 remaining;
+    };
+    struct Label {
+        Math::Vector3 position;
+        String text;
+        Math::Vector4 color;
+        float32 remaining;
+    };
+    const Array<Line>& GetLines() const { return lines_; }
+    const Array<Label>& GetLabels() const { return labels_; }
+
+    // Removes expired items; called once per frame after rendering
+    void Advance(float32 delta_time);
+
+    // Projects a world position to screen pixels (top-left origin); false when behind the camera
+    static bool ProjectToScreen(const Math::Matrix4& view_projection, const Math::Vector3& position,
+                                float32 screen_width, float32 screen_height, Math::Vector2& out);
 
 private:
     DebugRenderer() = default;
 
-    void UpdateDurations(float32 delta_time);
-    void BuildLineGeometry();
-
     bool enabled_ = true;
-    Array<DebugDrawCommand> commands_;
-    Array<DebugDrawCommand> persistent_commands_;
-
-    // Rendering resources
-    // VkBuffer line_vertex_buffer_;
-    // VkPipeline debug_pipeline_;
+    Array<Line> lines_;
+    Array<Label> labels_;
 };
 
 /**
@@ -368,7 +328,6 @@ public:
     void Cmd_Get(const Array<String>& args);
     void Cmd_Exec(const Array<String>& args);
     void Cmd_Clear(const Array<String>& args);
-    void Cmd_Quit(const Array<String>& args);
 
 private:
     Console() = default;

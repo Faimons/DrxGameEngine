@@ -1,245 +1,168 @@
+#pragma once
+
 /**
  * DRX Engine - Scene Serialization
- * Save/Load scenes to JSON/Binary format
+ * Scenes and prefabs as JSON. Components are registered with a name and a pair of
+ * read/write functions; the built-in components are registered automatically.
+ *
+ *   { "version": 1, "name": "Arena",
+ *     "entities": [ { "Name": { "name": "Wall" }, "Transform": { "position": [0, 2, 0] }, ... } ] }
  */
-
-#pragma once
 
 #include "Core/Public/CoreTypes.h"
 #include "Core/Public/Math/Vector3.h"
+#include "Core/Public/Math/Vector4.h"
 #include "Core/Public/Math/Quaternion.h"
 #include "Core/Public/Math/Transform.h"
+#include "Scene/Public/Entity.h"
 
 #include <rapidjson/document.h>
 
+#include <type_traits>
+
 namespace DRX::Scene {
 
-// Forward declarations
-class Scene;
-class Entity;
+using JsonAllocator = rapidjson::Document::AllocatorType;
 
-/**
- * Serialization format
- */
-enum class SerializationFormat : uint32 {
-    JSON,       // Human-readable JSON
-    Binary,     // Compact binary format
-    YAML        // YAML (future)
-};
-
-/**
- * Serialization context
- */
-struct SerializationContext {
-    SerializationFormat format = SerializationFormat::JSON;
-    bool pretty_print = true;
-    bool include_defaults = false;
-    bool compress = false;
-    uint32 version = 1;
-    String asset_root;
-
-    // Entity ID mapping for references
-    HashMap<uint64, uint64> id_remap;
-};
-
-/**
- * Component serializer interface
- */
-class IComponentSerializer {
-public:
-    virtual ~IComponentSerializer() = default;
-
-    virtual const char* GetTypeName() const = 0;
-    virtual void Serialize(rapidjson::Value& value, rapidjson::Document::AllocatorType& allocator,
-                           void* component, const SerializationContext& ctx) const = 0;
-    virtual void Deserialize(const rapidjson::Value& value, void* component,
-                             const SerializationContext& ctx) const = 0;
-};
-
-/**
- * JSON Utilities
- */
 namespace JsonUtil {
-    // Write helpers
-    void WriteVector3(rapidjson::Value& parent, const char* name,
-                      const Math::Vector3& v, rapidjson::Document::AllocatorType& alloc);
-    void WriteVector4(rapidjson::Value& parent, const char* name,
-                      const Math::Vector4& v, rapidjson::Document::AllocatorType& alloc);
-    void WriteQuaternion(rapidjson::Value& parent, const char* name,
-                         const Math::Quaternion& q, rapidjson::Document::AllocatorType& alloc);
-    void WriteTransform(rapidjson::Value& parent, const char* name,
-                        const Math::Transform& t, rapidjson::Document::AllocatorType& alloc);
-    void WriteString(rapidjson::Value& parent, const char* name,
-                     const String& s, rapidjson::Document::AllocatorType& alloc);
+void WriteVector3(rapidjson::Value& parent, const char* name, const Math::Vector3& v, JsonAllocator& alloc);
+void WriteVector4(rapidjson::Value& parent, const char* name, const Math::Vector4& v, JsonAllocator& alloc);
+void WriteQuaternion(rapidjson::Value& parent, const char* name, const Math::Quaternion& q, JsonAllocator& alloc);
+void WriteString(rapidjson::Value& parent, const char* name, const String& s, JsonAllocator& alloc);
+void WriteFloat(rapidjson::Value& parent, const char* name, float32 v, JsonAllocator& alloc);
+void WriteBool(rapidjson::Value& parent, const char* name, bool v, JsonAllocator& alloc);
 
-    // Read helpers
-    Math::Vector3 ReadVector3(const rapidjson::Value& value, const Math::Vector3& default_val = {});
-    Math::Vector4 ReadVector4(const rapidjson::Value& value, const Math::Vector4& default_val = {});
-    Math::Quaternion ReadQuaternion(const rapidjson::Value& value);
-    Math::Transform ReadTransform(const rapidjson::Value& value);
-    String ReadString(const rapidjson::Value& value, const char* name, const String& default_val = "");
-    float32 ReadFloat(const rapidjson::Value& value, const char* name, float32 default_val = 0.0f);
-    int32 ReadInt(const rapidjson::Value& value, const char* name, int32 default_val = 0);
-    bool ReadBool(const rapidjson::Value& value, const char* name, bool default_val = false);
-}
+// Readers return the default when the member is missing or has the wrong type
+Math::Vector3 ReadVector3(const rapidjson::Value& parent, const char* name, const Math::Vector3& default_val = {});
+Math::Vector4 ReadVector4(const rapidjson::Value& parent, const char* name, const Math::Vector4& default_val = {});
+Math::Quaternion ReadQuaternion(const rapidjson::Value& parent, const char* name,
+                                const Math::Quaternion& default_val = {});
+String ReadString(const rapidjson::Value& parent, const char* name, const String& default_val = {});
+float32 ReadFloat(const rapidjson::Value& parent, const char* name, float32 default_val = 0.0f);
+int32 ReadInt(const rapidjson::Value& parent, const char* name, int32 default_val = 0);
+bool ReadBool(const rapidjson::Value& parent, const char* name, bool default_val = false);
+} // namespace JsonUtil
 
 /**
- * Scene Serializer
+ * Registry of serializable component types
  */
-class SceneSerializer {
+class ComponentRegistry {
 public:
-    SceneSerializer(Scene* scene);
-    ~SceneSerializer() = default;
+    template<typename T>
+    using WriteFn = Function<void(const T&, rapidjson::Value&, JsonAllocator&)>;
+    template<typename T>
+    using ReadFn = Function<void(T&, const rapidjson::Value&)>;
 
-    // Serialize
-    bool SaveToFile(const String& path, const SerializationContext& ctx = {});
-    String SaveToString(const SerializationContext& ctx = {});
-    Array<uint8> SaveToBinary(const SerializationContext& ctx = {});
+    static ComponentRegistry& Instance();
 
-    // Deserialize
-    bool LoadFromFile(const String& path, const SerializationContext& ctx = {});
-    bool LoadFromString(const String& json, const SerializationContext& ctx = {});
-    bool LoadFromBinary(const Array<uint8>& data, const SerializationContext& ctx = {});
+    // Registers (or replaces) a component type under a JSON key
+    template<typename T>
+    void Register(const String& name, WriteFn<T> write, ReadFn<T> read);
 
-    // Component serializers
-    static void RegisterComponentSerializer(UniquePtr<IComponentSerializer> serializer);
-    static IComponentSerializer* GetComponentSerializer(const String& type_name);
+    struct Entry {
+        String name;
+        Function<bool(Scene&, EntityHandle)> has;
+        Function<void(Scene&, EntityHandle, rapidjson::Value&, JsonAllocator&)> write;
+        Function<void(Scene&, EntityHandle, const rapidjson::Value&)> read;
+    };
+    const Array<Entry>& GetEntries() const { return entries_; }
+    const Entry* Find(const String& name) const;
 
 private:
-    void SerializeEntity(rapidjson::Value& entities_array, Entity* entity,
-                         rapidjson::Document::AllocatorType& alloc, const SerializationContext& ctx);
-    Entity* DeserializeEntity(const rapidjson::Value& entity_value, const SerializationContext& ctx);
+    ComponentRegistry();
+    void RegisterBuiltins();
+    void Add(Entry entry);
 
-    void SerializeComponent(rapidjson::Value& components_array, const String& type_name,
-                            void* component, rapidjson::Document::AllocatorType& alloc,
-                            const SerializationContext& ctx);
+    Array<Entry> entries_;
+};
 
-    Scene* scene_ = nullptr;
-    static HashMap<String, UniquePtr<IComponentSerializer>> component_serializers_;
+class SceneSerializer {
+public:
+    static constexpr int32 kVersion = 1;
+
+    explicit SceneSerializer(Scene& scene) : scene_(scene) {}
+
+    bool SaveToFile(const String& path) const;
+    String SaveToString(bool pretty = true) const;
+
+    // Adds the file's entities to the scene; nothing is added when the file is invalid
+    bool LoadFromFile(const String& path);
+    bool LoadFromString(const String& json, const String& source_name = "<memory>");
+
+    // Single entity as a JSON object (used by prefabs)
+    static void WriteEntity(Scene& scene, EntityHandle handle, rapidjson::Value& out, JsonAllocator& alloc);
+    static Entity ReadEntity(Scene& scene, const rapidjson::Value& value);
+
+private:
+    Scene& scene_;
 };
 
 /**
- * Prefab - reusable entity template
+ * Prefab - one entity stored as JSON, instantiated any number of times
  */
 class Prefab {
 public:
-    Prefab() = default;
-    ~Prefab() = default;
-
     bool LoadFromFile(const String& path);
-    bool SaveToFile(const String& path);
+    bool LoadFromString(const String& json);
+    bool SaveToFile(const String& path) const;
+    void CaptureEntity(Entity entity);
 
-    bool LoadFromEntity(Entity* entity);
-    Entity* Instantiate(Scene* scene, const Math::Transform& transform = {});
+    // Creates a copy; the transform replaces the stored one
+    Entity Instantiate(Scene& scene, const Math::Transform& transform) const;
+    Entity Instantiate(Scene& scene) const;
 
-    const String& GetName() const { return name_; }
-    void SetName(const String& name) { name_ = name; }
-
-    const String& GetPath() const { return path_; }
+    bool IsValid() const { return !json_.empty(); }
+    const String& GetJson() const { return json_; }
 
 private:
-    String name_;
-    String path_;
-    String serialized_data_;
+    String json_;
 };
 
-/**
- * Prefab Manager
- */
 class PrefabManager {
 public:
     static PrefabManager& Instance();
 
-    bool Initialize();
-    void Shutdown();
-
     SharedPtr<Prefab> Load(const String& path);
-    SharedPtr<Prefab> Get(const String& path);
-    SharedPtr<Prefab> Create(const String& name, Entity* source_entity);
-
+    SharedPtr<Prefab> Get(const String& path) const;
     void Unload(const String& path);
     void UnloadAll();
-
-    Entity* Instantiate(const String& path, Scene* scene, const Math::Transform& transform = {});
+    Entity Instantiate(const String& path, Scene& scene, const Math::Transform& transform);
 
 private:
     PrefabManager() = default;
-
     HashMap<String, SharedPtr<Prefab>> prefabs_;
 };
 
-/**
- * Built-in component serializers
- */
+// ============================================================================
+// Template implementation
+// ============================================================================
 
-// Transform Component
-class TransformSerializer : public IComponentSerializer {
-public:
-    const char* GetTypeName() const override { return "Transform"; }
-    void Serialize(rapidjson::Value& value, rapidjson::Document::AllocatorType& allocator,
-                   void* component, const SerializationContext& ctx) const override;
-    void Deserialize(const rapidjson::Value& value, void* component,
-                     const SerializationContext& ctx) const override;
-};
-
-// MeshRenderer Component
-class MeshRendererSerializer : public IComponentSerializer {
-public:
-    const char* GetTypeName() const override { return "MeshRenderer"; }
-    void Serialize(rapidjson::Value& value, rapidjson::Document::AllocatorType& allocator,
-                   void* component, const SerializationContext& ctx) const override;
-    void Deserialize(const rapidjson::Value& value, void* component,
-                     const SerializationContext& ctx) const override;
-};
-
-// Camera Component
-class CameraSerializer : public IComponentSerializer {
-public:
-    const char* GetTypeName() const override { return "Camera"; }
-    void Serialize(rapidjson::Value& value, rapidjson::Document::AllocatorType& allocator,
-                   void* component, const SerializationContext& ctx) const override;
-    void Deserialize(const rapidjson::Value& value, void* component,
-                     const SerializationContext& ctx) const override;
-};
-
-// Light Component
-class LightSerializer : public IComponentSerializer {
-public:
-    const char* GetTypeName() const override { return "Light"; }
-    void Serialize(rapidjson::Value& value, rapidjson::Document::AllocatorType& allocator,
-                   void* component, const SerializationContext& ctx) const override;
-    void Deserialize(const rapidjson::Value& value, void* component,
-                     const SerializationContext& ctx) const override;
-};
-
-// RigidBody Component
-class RigidBodySerializer : public IComponentSerializer {
-public:
-    const char* GetTypeName() const override { return "RigidBody"; }
-    void Serialize(rapidjson::Value& value, rapidjson::Document::AllocatorType& allocator,
-                   void* component, const SerializationContext& ctx) const override;
-    void Deserialize(const rapidjson::Value& value, void* component,
-                     const SerializationContext& ctx) const override;
-};
-
-// Script Component
-class ScriptComponentSerializer : public IComponentSerializer {
-public:
-    const char* GetTypeName() const override { return "Script"; }
-    void Serialize(rapidjson::Value& value, rapidjson::Document::AllocatorType& allocator,
-                   void* component, const SerializationContext& ctx) const override;
-    void Deserialize(const rapidjson::Value& value, void* component,
-                     const SerializationContext& ctx) const override;
-};
-
-// AudioSource Component
-class AudioSourceSerializer : public IComponentSerializer {
-public:
-    const char* GetTypeName() const override { return "AudioSource"; }
-    void Serialize(rapidjson::Value& value, rapidjson::Document::AllocatorType& allocator,
-                   void* component, const SerializationContext& ctx) const override;
-    void Deserialize(const rapidjson::Value& value, void* component,
-                     const SerializationContext& ctx) const override;
-};
+template<typename T>
+void ComponentRegistry::Register(const String& name, WriteFn<T> write, ReadFn<T> read) {
+    Entry entry;
+    entry.name = name;
+    entry.has = [](Scene& scene, EntityHandle handle) { return scene.HasComponent<T>(handle); };
+    entry.write = [write = std::move(write)](Scene& scene, EntityHandle handle, rapidjson::Value& out,
+                                             JsonAllocator& alloc) {
+        if (const T* component = scene.GetComponent<T>(handle)) {
+            write(*component, out, alloc);
+            if constexpr (std::is_base_of_v<Component, T>) {
+                if (!component->enabled) JsonUtil::WriteBool(out, "enabled", false, alloc);
+            }
+        }
+    };
+    entry.read = [read = std::move(read)](Scene& scene, EntityHandle handle, const rapidjson::Value& value) {
+        T* component = scene.GetComponent<T>(handle);
+        if (!component) {
+            scene.AddComponent<T>(handle, T{});
+            component = scene.GetComponent<T>(handle);
+        }
+        read(*component, value);
+        if constexpr (std::is_base_of_v<Component, T>) {
+            component->enabled = JsonUtil::ReadBool(value, "enabled", true);
+        }
+    };
+    Add(std::move(entry));
+}
 
 } // namespace DRX::Scene

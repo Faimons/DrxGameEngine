@@ -4,11 +4,17 @@
 
 #include <gtest/gtest.h>
 #include <cmath>
+#include <cstdio>
+#include <fstream>
+#include <cstring>
 
 #include "Core/Public/Log.h"
 #include "Animation/Public/AnimationSystem.h"
 #include "Particles/Public/ParticleSystem.h"
 #include "UI/Public/UISystem.h"
+#include "Scene/Public/SceneSerialization.h"
+#include "Resource/Public/ResourceManager.h"
+#include "Audio/Public/SoundSynth.h"
 
 using namespace DRX;
 
@@ -457,4 +463,223 @@ TEST_F(UITest, SliderClampsValue) {
     ui().SliderFloat("Volume", value, 0.0f, 1.0f);
     ui().EndFrame();
     EXPECT_FLOAT_EQ(value, 1.0f);
+}
+
+// ============================================================================
+// Scene Serialization Tests
+// ============================================================================
+
+TEST(SceneSerializationTest, RoundTripBuiltinComponents) {
+    Scene::Scene source("Arena");
+    Scene::Entity wall = source.CreateEntity("Wall");
+    wall.GetTransform().transform.position = Math::Vector3(1.0f, 2.0f, 3.0f);
+    wall.GetTransform().transform.scale = Math::Vector3(4.0f, 3.0f, 0.5f);
+    auto& collider = wall.AddComponent<Scene::ColliderComponent>();
+    collider.shape = Scene::ColliderComponent::Shape::Box;
+    collider.size = Math::Vector3(4.0f, 3.0f, 0.5f);
+    auto& body = wall.AddComponent<Scene::RigidBodyComponent>();
+    body.body_type = Scene::RigidBodyComponent::BodyType::Kinematic;
+    body.enabled = false;
+    auto& mesh = wall.AddComponent<Scene::MeshComponent>();
+    mesh.source = "graybox:box";
+
+    Scene::Entity light = source.CreateEntity("Sun");
+    auto& light_comp = light.AddComponent<Scene::LightComponent>();
+    light_comp.type = Scene::LightComponent::Type::Directional;
+    light_comp.intensity = 3.5f;
+
+    const String json = Scene::SceneSerializer(source).SaveToString();
+
+    Scene::Scene loaded;
+    ASSERT_TRUE(Scene::SceneSerializer(loaded).LoadFromString(json));
+    EXPECT_EQ(loaded.GetName(), "Arena");
+    ASSERT_EQ(loaded.GetAllEntities().size(), 2u);
+
+    Scene::Entity loaded_wall = loaded.FindEntityByName("Wall");
+    ASSERT_TRUE(loaded_wall.IsValid());
+    EXPECT_FLOAT_EQ(loaded_wall.GetTransform().transform.position.z, 3.0f);
+    EXPECT_FLOAT_EQ(loaded_wall.GetTransform().transform.scale.x, 4.0f);
+    ASSERT_TRUE(loaded_wall.HasComponent<Scene::ColliderComponent>());
+    EXPECT_FLOAT_EQ(loaded_wall.GetComponent<Scene::ColliderComponent>().size.y, 3.0f);
+    ASSERT_TRUE(loaded_wall.HasComponent<Scene::RigidBodyComponent>());
+    EXPECT_EQ(loaded_wall.GetComponent<Scene::RigidBodyComponent>().body_type,
+              Scene::RigidBodyComponent::BodyType::Kinematic);
+    EXPECT_FALSE(loaded_wall.GetComponent<Scene::RigidBodyComponent>().enabled);
+    EXPECT_EQ(loaded_wall.GetComponent<Scene::MeshComponent>().source, "graybox:box");
+
+    Scene::Entity loaded_light = loaded.FindEntityByName("Sun");
+    ASSERT_TRUE(loaded_light.HasComponent<Scene::LightComponent>());
+    EXPECT_EQ(loaded_light.GetComponent<Scene::LightComponent>().type, Scene::LightComponent::Type::Directional);
+    EXPECT_FLOAT_EQ(loaded_light.GetComponent<Scene::LightComponent>().intensity, 3.5f);
+}
+
+TEST(SceneSerializationTest, InvalidSceneAddsNothing) {
+    Scene::Scene scene;
+    Scene::SceneSerializer serializer(scene);
+    EXPECT_FALSE(serializer.LoadFromString("{ \"entities\": [ {}, 5 ] }"));
+    EXPECT_FALSE(serializer.LoadFromString("{ \"version\": 99, \"entities\": [] }"));
+    EXPECT_FALSE(serializer.LoadFromString("not json"));
+    EXPECT_TRUE(scene.GetAllEntities().empty());
+}
+
+TEST(SceneSerializationTest, PrefabInstantiatesCopies) {
+    Scene::Scene scene;
+    Scene::Entity crate = scene.CreateEntity("Crate");
+    crate.AddComponent<Scene::ColliderComponent>().radius = 0.75f;
+
+    Scene::Prefab prefab;
+    prefab.CaptureEntity(crate);
+    ASSERT_TRUE(prefab.IsValid());
+
+    Math::Transform placement(Math::Vector3(10.0f, 0.0f, -5.0f));
+    Scene::Entity a = prefab.Instantiate(scene, placement);
+    Scene::Entity b = prefab.Instantiate(scene);
+    ASSERT_TRUE(a.IsValid());
+    ASSERT_TRUE(b.IsValid());
+    EXPECT_NE(a, b);
+    EXPECT_EQ(a.GetName(), "Crate");
+    EXPECT_FLOAT_EQ(a.GetTransform().transform.position.x, 10.0f);
+    EXPECT_FLOAT_EQ(b.GetComponent<Scene::ColliderComponent>().radius, 0.75f);
+    EXPECT_EQ(scene.GetAllEntities().size(), 3u);
+}
+
+// ============================================================================
+// Asset Package Tests
+// ============================================================================
+
+TEST(AssetPackageTest, SaveOpenReadAndAppend) {
+    const String path = testing::TempDir() + "drx_test_package.drxp";
+    const String text = "hello package";
+    const uint8 binary[] = {0, 1, 2, 255, 128};
+
+    Resource::AssetPackage package;
+    package.Create(path);
+    ASSERT_TRUE(package.AddFile("text.txt", text.data(), text.size()));
+    ASSERT_TRUE(package.AddFile("data.bin", binary, sizeof(binary)));
+    ASSERT_TRUE(package.Save());
+
+    Resource::AssetPackage reader;
+    ASSERT_TRUE(reader.Open(path));
+    EXPECT_TRUE(reader.HasFile("text.txt"));
+    EXPECT_FALSE(reader.HasFile("missing"));
+    const Array<uint8> read_text = reader.ReadFile("text.txt");
+    EXPECT_EQ(String(read_text.begin(), read_text.end()), text);
+    EXPECT_EQ(reader.ReadFile("data.bin"), Array<uint8>(binary, binary + sizeof(binary)));
+
+    // Append to the opened package; existing files are preserved
+    const String extra = "more";
+    ASSERT_TRUE(reader.AddFile("extra.txt", extra.data(), extra.size()));
+    ASSERT_TRUE(reader.Save());
+
+    Resource::AssetPackage again;
+    ASSERT_TRUE(again.Open(path));
+    EXPECT_EQ(again.GetFileList(), (Array<String>{"data.bin", "extra.txt", "text.txt"}));
+    EXPECT_EQ(again.ReadFile("data.bin").size(), sizeof(binary));
+    std::remove(path.c_str());
+}
+
+TEST(AssetPackageTest, RejectsInvalidFiles) {
+    const String path = testing::TempDir() + "drx_test_not_a_package.bin";
+    {
+        std::ofstream file(path, std::ios::binary);
+        file << "XXXXgarbage";
+    }
+    Resource::AssetPackage package;
+    EXPECT_FALSE(package.Open(path));
+    EXPECT_FALSE(package.Open(path + ".missing"));
+    std::remove(path.c_str());
+}
+
+// ============================================================================
+// Audio Decoding / Synthesis Tests (no audio device needed)
+// ============================================================================
+
+namespace {
+
+Array<uint8> MakeWav(uint16 format_tag, uint16 channels, uint32 rate, uint16 bits, const Array<uint8>& payload) {
+    Array<uint8> out;
+    auto put16 = [&](uint16 v) { out.push_back(v & 0xFF); out.push_back(v >> 8); };
+    auto put32 = [&](uint32 v) { for (int i = 0; i < 4; ++i) out.push_back((v >> (8 * i)) & 0xFF); };
+    auto tag = [&](const char* t) { out.insert(out.end(), t, t + 4); };
+    tag("RIFF"); put32(36 + static_cast<uint32>(payload.size())); tag("WAVE");
+    tag("LIST"); put32(3); out.insert(out.end(), {'a', 'b', 'c', 0});   // odd chunk with padding byte
+    tag("fmt "); put32(16); put16(format_tag); put16(channels); put32(rate);
+    put32(rate * channels * bits / 8); put16(static_cast<uint16>(channels * bits / 8)); put16(bits);
+    tag("data"); put32(static_cast<uint32>(payload.size()));
+    out.insert(out.end(), payload.begin(), payload.end());
+    return out;
+}
+
+} // namespace
+
+TEST(AudioDecodeTest, Wav16BitStereo) {
+    const Array<uint8> payload = {0x00, 0x40, 0x00, 0xC0, 0xFF, 0x7F, 0x01, 0x80};   // 16384, -16384, 32767, -32767
+    const Array<uint8> wav = MakeWav(1, 2, 22050, 16, payload);
+    EXPECT_EQ(Audio::DetectAudioFormat(wav.data(), wav.size()), Audio::AudioFormat::WAV);
+
+    Audio::PcmData pcm;
+    String error;
+    ASSERT_TRUE(Audio::DecodeAudio(wav.data(), wav.size(), Audio::AudioFormat::Unknown, pcm, error)) << error;
+    EXPECT_EQ(pcm.channels, 2u);
+    EXPECT_EQ(pcm.sample_rate, 22050u);
+    EXPECT_EQ(pcm.GetFrameCount(), 2u);
+    EXPECT_EQ(pcm.samples, (Array<int16>{16384, -16384, 32767, -32767}));
+}
+
+TEST(AudioDecodeTest, Wav8BitAndFloat) {
+    Audio::PcmData pcm;
+    String error;
+    const Array<uint8> wav8 = MakeWav(1, 1, 8000, 8, {128, 255, 0});
+    ASSERT_TRUE(Audio::DecodeAudio(wav8.data(), wav8.size(), Audio::AudioFormat::WAV, pcm, error)) << error;
+    EXPECT_EQ(pcm.samples, (Array<int16>{0, 127 << 8, -128 << 8}));
+
+    const float32 values[2] = {0.5f, -1.0f};
+    Array<uint8> payload(sizeof(values));
+    std::memcpy(payload.data(), values, sizeof(values));
+    const Array<uint8> wavf = MakeWav(3, 1, 48000, 32, payload);
+    ASSERT_TRUE(Audio::DecodeAudio(wavf.data(), wavf.size(), Audio::AudioFormat::WAV, pcm, error)) << error;
+    ASSERT_EQ(pcm.samples.size(), 2u);
+    EXPECT_NEAR(pcm.samples[0], 16384, 1);
+    EXPECT_EQ(pcm.samples[1], -32767);
+}
+
+TEST(AudioDecodeTest, RejectsInvalidData) {
+    Audio::PcmData pcm;
+    String error;
+    const Array<uint8> garbage = {'n', 'o', 'p', 'e'};
+    EXPECT_FALSE(Audio::DecodeAudio(garbage.data(), garbage.size(), Audio::AudioFormat::Unknown, pcm, error));
+    EXPECT_FALSE(Audio::DecodeAudio(garbage.data(), garbage.size(), Audio::AudioFormat::OGG, pcm, error));
+    const Array<uint8> six_channels = MakeWav(1, 6, 44100, 16, Array<uint8>(24, 0));
+    EXPECT_FALSE(Audio::DecodeAudio(six_channels.data(), six_channels.size(), Audio::AudioFormat::WAV, pcm, error));
+    const Array<uint8> adpcm = MakeWav(2, 1, 44100, 4, Array<uint8>(8, 0));
+    EXPECT_FALSE(Audio::DecodeAudio(adpcm.data(), adpcm.size(), Audio::AudioFormat::WAV, pcm, error));
+}
+
+TEST(SoundSynthTest, ToneLengthAndEnvelope) {
+    Audio::Synth::ToneParams params;
+    params.duration = 0.5f;
+    params.volume = 0.5f;
+    const Audio::PcmData pcm = Audio::Synth::Tone(params);
+    EXPECT_EQ(pcm.channels, 1u);
+    EXPECT_EQ(pcm.sample_rate, Audio::Synth::kSampleRate);
+    EXPECT_EQ(pcm.samples.size(), static_cast<size_t>(0.5f * Audio::Synth::kSampleRate));
+    EXPECT_EQ(pcm.samples.front(), 0);   // attack starts silent
+
+    int16 peak = 0;
+    for (int16 s : pcm.samples) peak = std::max<int16>(peak, static_cast<int16>(std::abs(s)));
+    EXPECT_NEAR(peak, 16384, 400);       // volume 0.5
+}
+
+TEST(SoundSynthTest, PresetsAreDeterministicAndBounded) {
+    const Audio::PcmData a = Audio::Synth::Gunshot(0.9f, 7);
+    const Audio::PcmData b = Audio::Synth::Gunshot(0.9f, 7);
+    EXPECT_EQ(a.samples, b.samples);
+    EXPECT_NE(a.samples, Audio::Synth::Gunshot(0.9f, 8).samples);
+
+    for (const Audio::PcmData& pcm : {Audio::Synth::Hit(), Audio::Synth::Headshot(), Audio::Synth::Alarm(1.0f),
+                                      Audio::Synth::Click(), Audio::Synth::Footstep()}) {
+        EXPECT_FALSE(pcm.samples.empty());
+        EXPECT_GT(pcm.GetDuration(), 0.0f);
+    }
+    EXPECT_NEAR(Audio::Synth::Alarm(2.0f).GetDuration(), 2.0f, 1e-3f);
 }

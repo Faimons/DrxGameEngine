@@ -200,11 +200,11 @@ void LuaScript::OnFixedUpdate(float32 fixed_delta_time) {
     lua_pop(L_, 1);
 }
 
-void LuaScript::OnCollisionEnter(void* other) { CallMethod("OnCollisionEnter"); }
-void LuaScript::OnCollisionStay(void* other) { CallMethod("OnCollisionStay"); }
-void LuaScript::OnCollisionExit(void* other) { CallMethod("OnCollisionExit"); }
-void LuaScript::OnTriggerEnter(void* other) { CallMethod("OnTriggerEnter"); }
-void LuaScript::OnTriggerExit(void* other) { CallMethod("OnTriggerExit"); }
+void LuaScript::OnCollisionEnter(void* /*other*/) { CallMethod("OnCollisionEnter"); }
+void LuaScript::OnCollisionStay(void* /*other*/) { CallMethod("OnCollisionStay"); }
+void LuaScript::OnCollisionExit(void* /*other*/) { CallMethod("OnCollisionExit"); }
+void LuaScript::OnTriggerEnter(void* /*other*/) { CallMethod("OnTriggerEnter"); }
+void LuaScript::OnTriggerExit(void* /*other*/) { CallMethod("OnTriggerExit"); }
 
 void LuaScript::CallMethod(const String& name) {
     if (!loaded_ || script_ref_ == -1) return;

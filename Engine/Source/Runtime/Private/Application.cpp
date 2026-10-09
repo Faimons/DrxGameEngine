@@ -7,6 +7,7 @@
 #include "Core/Public/Platform.h"
 #include "Audio/Public/AudioSystem.h"
 #include "Particles/Public/ParticleSystem.h"
+#include "Debug/Public/DebugSystem.h"
 
 #include <GLFW/glfw3.h>
 
@@ -211,6 +212,10 @@ bool Application::InitializeSystems() {
         }
     }
 
+    Debug::Console& console = Debug::Console::Instance();
+    console.Initialize();
+    console.RegisterCommand("quit", [this](const Array<String>&) { RequestQuit(); }, "Quit the application");
+
     Particles::ParticleManager::Instance().Initialize();
 
     camera_ = Renderer::CameraParams::LookAt(Math::Vector3(0, 2, 5), Math::Vector3::Zero, kDefaultFov, GetAspectRatio());
@@ -218,6 +223,8 @@ bool Application::InitializeSystems() {
 }
 
 void Application::ShutdownSystems() {
+    Debug::Console::Instance().UnregisterCommand("quit");   // the handler refers to this application
+    Debug::DebugRenderer::Instance().Clear();
     Particles::ParticleManager::Instance().Shutdown();
 
     if (audio_available_) {
@@ -310,6 +317,9 @@ void Application::RunFrame() {
         }
     }
 
+    // Debug shapes from the previous frame have been drawn; expire them before new ones are added
+    Debug::DebugRenderer::Instance().Advance(frame_time);
+
     // Fixed-step simulation
     accumulator_ += frame_time;
     uint32 steps = 0;
@@ -326,6 +336,12 @@ void Application::RunFrame() {
     OnUpdate(frame_time);
     Particles::ParticleManager::Instance().Update(frame_time);
     if (audio_available_) {
+        // The listener follows the camera (view matrix rows hold the camera basis)
+        const Math::Matrix4& view = camera_.view;
+        Audio::AudioListener& listener = Audio::AudioSystem::Instance().GetListener();
+        listener.SetPosition(camera_.position);
+        listener.SetOrientation(Math::Vector3(-view.m[0][2], -view.m[1][2], -view.m[2][2]),
+                                Math::Vector3(view.m[0][1], view.m[1][1], view.m[2][1]));
         Audio::AudioSystem::Instance().Update(frame_time);
     }
 
@@ -357,10 +373,25 @@ void Application::RunFrame() {
     renderer_->BeginFrame(camera_, environment_);
     OnRender(*renderer_);
 
+    const Debug::DebugRenderer& debug = Debug::DebugRenderer::Instance();
+    for (const auto& line : debug.GetLines()) {
+        renderer_->DrawLine(line.start, line.end, line.color);
+    }
+
     UI::UIContext& ui = GetUI();
     ForwardInputToUI();
     ui.BeginFrame();
     OnUI(ui);
+    if (!debug.GetLabels().empty()) {
+        const Math::Matrix4 view_projection = camera_.projection * camera_.view;
+        for (const auto& label : debug.GetLabels()) {
+            Math::Vector2 screen;
+            if (Debug::DebugRenderer::ProjectToScreen(view_projection, label.position, ui.GetScreenWidth(),
+                                                      ui.GetScreenHeight(), screen)) {
+                ui.DrawText(label.text, screen.x - ui.GetTextWidth(label.text) * 0.5f, screen.y, label.color);
+            }
+        }
+    }
     ui.EndFrame();
     renderer_->DrawUI(ui.GetDrawCommands(), ui.GetScreenWidth(), ui.GetScreenHeight());
 

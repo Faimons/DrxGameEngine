@@ -266,17 +266,7 @@ ResourceHandle<T> ResourceManager::Get(const String& path) {
 }
 
 struct TextureImportSettings {
-    bool generate_mipmaps = true;
-    bool compress = true;
-    bool srgb = true;
-    uint32 max_size = 4096;
-};
-
-struct MeshImportSettings {
-    bool optimize = true;
-    bool generate_tangents = true;
-    bool generate_normals = true;
-    float scale = 1.0f;
+    uint32 max_size = 4096;   // larger images are halved until both sides fit
 };
 
 /**
@@ -291,11 +281,11 @@ public:
 
     // Import settings
     using TextureImportSettings = Resource::TextureImportSettings;
-    using MeshImportSettings = Resource::MeshImportSettings;
 
-    // Import functions
+    // Decodes any stb_image format and writes an RGBA PNG
     bool ImportTexture(const String& source, const String& dest, const TextureImportSettings& settings = {});
-    bool ImportMesh(const String& source, const String& dest, const MeshImportSettings& settings = {});
+    // Models and audio are loaded from their source formats at runtime; importing copies them
+    bool ImportMesh(const String& source, const String& dest);
     bool ImportAudio(const String& source, const String& dest);
 
     // Batch import
@@ -311,9 +301,12 @@ private:
 class AssetPackage {
 public:
     AssetPackage() = default;
-    ~AssetPackage();
+    ~AssetPackage() = default;
 
-    bool Create(const String& path);
+    // Starts a new package; files are kept in memory until Save()
+    void Create(const String& path);
+    bool Save();
+    // Opens an existing package for reading
     bool Open(const String& path);
     void Close();
 
@@ -328,17 +321,14 @@ public:
 
 private:
     struct FileEntry {
-        String name;
-        uint64 offset;
-        uint64 size;
-        uint64 compressed_size;
-        uint32 flags;
+        uint64 offset = 0;
+        uint64 size = 0;
     };
 
     String package_path_;
     HashMap<String, FileEntry> entries_;
+    HashMap<String, Array<uint8>> pending_;
     uint64 package_size_ = 0;
-    void* file_handle_ = nullptr;
 };
 
 } // namespace DRX::Resource

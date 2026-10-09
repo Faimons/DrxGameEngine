@@ -8,6 +8,11 @@
 #include <fstream>
 #include <chrono>
 #include <cstring>
+#include <algorithm>
+#include <filesystem>
+
+#include <stb_image.h>
+#include <stb_image_write.h>
 
 namespace DRX::Resource {
 
@@ -407,21 +412,52 @@ void AssetImporter::Shutdown() {
 }
 
 bool AssetImporter::ImportTexture(const String& source, const String& dest,
-                                   const TextureImportSettings& settings) {
-    // In a real implementation, this would process the image
-    // For now, just copy the file
-    try {
-        std::filesystem::copy(source, dest, std::filesystem::copy_options::overwrite_existing);
-        DRX_LOG_INFO("Imported texture: {} -> {}", source, dest);
-        return true;
-    } catch (const std::exception& e) {
-        DRX_LOG_ERROR("Failed to import texture: {}", e.what());
+                                  const TextureImportSettings& settings) {
+    int width = 0, height = 0, channels = 0;
+    stbi_uc* decoded = stbi_load(source.c_str(), &width, &height, &channels, STBI_rgb_alpha);
+    if (!decoded) {
+        DRX_LOG_ERROR("Failed to import texture {}: {}", source, stbi_failure_reason());
         return false;
     }
+    Array<uint8> pixels(decoded, decoded + static_cast<size_t>(width) * height * 4);
+    stbi_image_free(decoded);
+
+    // 2x2 box filter until the image fits
+    const uint32 max_size = std::max(1u, settings.max_size);
+    while (static_cast<uint32>(width) > max_size || static_cast<uint32>(height) > max_size) {
+        const int w = std::max(1, width / 2), h = std::max(1, height / 2);
+        Array<uint8> half(static_cast<size_t>(w) * h * 4);
+        for (int y = 0; y < h; ++y) {
+            for (int x = 0; x < w; ++x) {
+                for (int c = 0; c < 4; ++c) {
+                    uint32 sum = 0;
+                    for (int dy = 0; dy < 2; ++dy) {
+                        for (int dx = 0; dx < 2; ++dx) {
+                            const int sx = std::min(width - 1, x * 2 + dx), sy = std::min(height - 1, y * 2 + dy);
+                            sum += pixels[(static_cast<size_t>(sy) * width + sx) * 4 + c];
+                        }
+                    }
+                    half[(static_cast<size_t>(y) * w + x) * 4 + c] = static_cast<uint8>((sum + 2) / 4);
+                }
+            }
+        }
+        pixels = std::move(half);
+        width = w;
+        height = h;
+    }
+
+    std::error_code ec;
+    const auto parent = std::filesystem::path(dest).parent_path();
+    if (!parent.empty()) std::filesystem::create_directories(parent, ec);
+    if (!stbi_write_png(dest.c_str(), width, height, 4, pixels.data(), width * 4)) {
+        DRX_LOG_ERROR("Failed to write texture {}", dest);
+        return false;
+    }
+    DRX_LOG_INFO("Imported texture: {} -> {} ({}x{})", source, dest, width, height);
+    return true;
 }
 
-bool AssetImporter::ImportMesh(const String& source, const String& dest,
-                                const MeshImportSettings& settings) {
+bool AssetImporter::ImportMesh(const String& source, const String& dest) {
     try {
         std::filesystem::copy(source, dest, std::filesystem::copy_options::overwrite_existing);
         DRX_LOG_INFO("Imported mesh: {} -> {}", source, dest);
@@ -468,124 +504,164 @@ void AssetImporter::ImportDirectory(const String& source_dir, const String& dest
 // AssetPackage Implementation
 // ============================================================================
 
-AssetPackage::~AssetPackage() {
-    Close();
+namespace {
+constexpr char kPackageMagic[4] = {'D', 'R', 'X', 'P'};
+constexpr uint32 kPackageVersion = 1;
+
+template<typename T>
+void WritePod(std::ofstream& file, const T& value) {
+    file.write(reinterpret_cast<const char*>(&value), sizeof(T));
 }
 
-bool AssetPackage::Create(const String& path) {
+template<typename T>
+bool ReadPod(std::ifstream& file, T& value) {
+    return static_cast<bool>(file.read(reinterpret_cast<char*>(&value), sizeof(T)));
+}
+} // namespace
+
+void AssetPackage::Create(const String& path) {
+    Close();
     package_path_ = path;
+}
+
+bool AssetPackage::Save() {
+    if (package_path_.empty()) return false;
+
+    // Keep files of an opened package that were not replaced
+    for (const auto& [name, entry] : entries_) {
+        if (!pending_.count(name)) pending_[name] = ReadFile(name);
+    }
+
+    // Layout: magic, version, count, table (name_len, name, offset, size), data
+    Array<String> names;
+    names.reserve(pending_.size());
+    for (const auto& [name, data] : pending_) names.push_back(name);
+    std::sort(names.begin(), names.end());
+
+    uint64 table_size = sizeof(kPackageMagic) + sizeof(uint32) * 2;
+    for (const String& name : names) table_size += sizeof(uint32) + name.size() + sizeof(uint64) * 2;
+
+    std::ofstream file(package_path_, std::ios::binary | std::ios::trunc);
+    if (!file) {
+        DRX_LOG_ERROR("Cannot write package {}", package_path_);
+        return false;
+    }
+    file.write(kPackageMagic, sizeof(kPackageMagic));
+    WritePod(file, kPackageVersion);
+    WritePod(file, static_cast<uint32>(names.size()));
+
     entries_.clear();
-    package_size_ = 0;
+    uint64 offset = table_size;
+    for (const String& name : names) {
+        const uint64 size = pending_[name].size();
+        WritePod(file, static_cast<uint32>(name.size()));
+        file.write(name.data(), static_cast<std::streamsize>(name.size()));
+        WritePod(file, offset);
+        WritePod(file, size);
+        entries_[name] = {offset, size};
+        offset += size;
+    }
+    for (const String& name : names) {
+        const Array<uint8>& data = pending_[name];
+        file.write(reinterpret_cast<const char*>(data.data()), static_cast<std::streamsize>(data.size()));
+    }
+    if (!file) {
+        DRX_LOG_ERROR("Failed while writing package {}", package_path_);
+        return false;
+    }
+    package_size_ = offset;
+    pending_.clear();
     return true;
 }
 
 bool AssetPackage::Open(const String& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file) {
+    Close();
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) return false;
+    const auto file_size = static_cast<uint64>(file.tellg());
+    file.seekg(0);
+
+    char magic[4] = {};
+    uint32 version = 0, count = 0;
+    if (!file.read(magic, 4) || std::memcmp(magic, kPackageMagic, 4) != 0 || !ReadPod(file, version) ||
+        version != kPackageVersion || !ReadPod(file, count)) {
+        DRX_LOG_ERROR("{} is not a valid DRX package", path);
         return false;
+    }
+
+    HashMap<String, FileEntry> entries;
+    for (uint32 i = 0; i < count; ++i) {
+        uint32 name_length = 0;
+        if (!ReadPod(file, name_length) || name_length == 0 || name_length > 4096) {
+            DRX_LOG_ERROR("Package {} has a corrupt file table", path);
+            return false;
+        }
+        String name(name_length, '\0');
+        FileEntry entry;
+        if (!file.read(name.data(), name_length) || !ReadPod(file, entry.offset) || !ReadPod(file, entry.size) ||
+            entry.offset > file_size || entry.size > file_size - entry.offset) {
+            DRX_LOG_ERROR("Package {} has a corrupt file table", path);
+            return false;
+        }
+        entries[name] = entry;
     }
 
     package_path_ = path;
-
-    // Read header
-    char magic[4];
-    file.read(magic, 4);
-    if (std::strncmp(magic, "DRXP", 4) != 0) {
-        return false;
-    }
-
-    uint32 version;
-    file.read(reinterpret_cast<char*>(&version), 4);
-
-    uint32 entry_count;
-    file.read(reinterpret_cast<char*>(&entry_count), 4);
-
-    // Read entries
-    for (uint32 i = 0; i < entry_count; i++) {
-        uint32 name_len;
-        file.read(reinterpret_cast<char*>(&name_len), 4);
-
-        String name(name_len, '\0');
-        file.read(name.data(), name_len);
-
-        FileEntry entry;
-        entry.name = name;
-        file.read(reinterpret_cast<char*>(&entry.offset), 8);
-        file.read(reinterpret_cast<char*>(&entry.size), 8);
-        file.read(reinterpret_cast<char*>(&entry.compressed_size), 8);
-        file.read(reinterpret_cast<char*>(&entry.flags), 4);
-
-        entries_[name] = entry;
-    }
-
+    entries_ = std::move(entries);
+    package_size_ = file_size;
     return true;
 }
 
 void AssetPackage::Close() {
     entries_.clear();
+    pending_.clear();
     package_path_.clear();
     package_size_ = 0;
 }
 
 bool AssetPackage::AddFile(const String& name, const void* data, uint64 size) {
-    FileEntry entry;
-    entry.name = name;
-    entry.offset = package_size_;
-    entry.size = size;
-    entry.compressed_size = size;
-    entry.flags = 0;
-
-    entries_[name] = entry;
-    package_size_ += size;
-
+    if (name.empty() || (size > 0 && !data)) return false;
+    const auto* bytes = static_cast<const uint8*>(data);
+    pending_[name] = Array<uint8>(bytes, bytes + size);
     return true;
 }
 
 bool AssetPackage::AddFile(const String& name, const String& source_path) {
     std::ifstream file(source_path, std::ios::binary | std::ios::ate);
-    if (!file) {
-        return false;
-    }
-
-    uint64 size = file.tellg();
+    if (!file) return false;
+    const auto size = static_cast<uint64>(file.tellg());
     file.seekg(0);
-
     Array<uint8> data(size);
-    file.read(reinterpret_cast<char*>(data.data()), size);
-
-    return AddFile(name, data.data(), size);
+    if (!file.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(size))) return false;
+    pending_[name] = std::move(data);
+    return true;
 }
 
 bool AssetPackage::HasFile(const String& name) const {
-    return entries_.find(name) != entries_.end();
+    return pending_.count(name) > 0 || entries_.count(name) > 0;
 }
 
 Array<uint8> AssetPackage::ReadFile(const String& name) const {
-    auto it = entries_.find(name);
-    if (it == entries_.end()) {
-        return {};
-    }
+    if (auto pending = pending_.find(name); pending != pending_.end()) return pending->second;
 
+    const auto it = entries_.find(name);
+    if (it == entries_.end()) return {};
     std::ifstream file(package_path_, std::ios::binary);
-    if (!file) {
-        return {};
-    }
+    if (!file) return {};
 
-    const FileEntry& entry = it->second;
-    file.seekg(entry.offset);
-
-    Array<uint8> data(entry.size);
-    file.read(reinterpret_cast<char*>(data.data()), entry.size);
-
+    Array<uint8> data(it->second.size);
+    file.seekg(static_cast<std::streamoff>(it->second.offset));
+    if (!file.read(reinterpret_cast<char*>(data.data()), static_cast<std::streamsize>(data.size()))) return {};
     return data;
 }
 
 Array<String> AssetPackage::GetFileList() const {
     Array<String> result;
-    result.reserve(entries_.size());
-    for (const auto& [name, entry] : entries_) {
-        result.push_back(name);
+    for (const auto& [name, entry] : entries_) result.push_back(name);
+    for (const auto& [name, data] : pending_) {
+        if (!entries_.count(name)) result.push_back(name);
     }
+    std::sort(result.begin(), result.end());
     return result;
 }
 

@@ -43,6 +43,7 @@ struct NameComponent : public Component {
 };
 
 struct MeshComponent : public Component {
+    String source;          // asset path or procedural id; resolved to `mesh` by the game
     MeshHandle mesh;
     MaterialHandle material;
     bool cast_shadow = true;
@@ -119,6 +120,7 @@ public:
 
     bool IsValid() const;
     EntityHandle GetHandle() const { return handle_; }
+    Scene* GetScene() const { return scene_; }
 
     template<typename T, typename... Args>
     T& AddComponent(Args&&... args) {

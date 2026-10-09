@@ -89,17 +89,17 @@ public:
 
     virtual void OnCreate() {}
     virtual void OnDestroy() {}
-    virtual void OnUpdate(float32 delta_time) {}
-    virtual void OnFixedUpdate(float32 fixed_delta_time) {}
+    virtual void OnUpdate(float32 /*delta_time*/) {}
+    virtual void OnFixedUpdate(float32 /*fixed_delta_time*/) {}
     virtual void OnEnable() {}
     virtual void OnDisable() {}
 
     // Collision events
-    virtual void OnCollisionEnter(void* other) {}
-    virtual void OnCollisionStay(void* other) {}
-    virtual void OnCollisionExit(void* other) {}
-    virtual void OnTriggerEnter(void* other) {}
-    virtual void OnTriggerExit(void* other) {}
+    virtual void OnCollisionEnter(void* /*other*/) {}
+    virtual void OnCollisionStay(void* /*other*/) {}
+    virtual void OnCollisionExit(void* /*other*/) {}
+    virtual void OnTriggerEnter(void* /*other*/) {}
+    virtual void OnTriggerExit(void* /*other*/) {}
 
     void* GetEntity() const { return entity_; }
     void SetEntity(void* entity) { entity_ = entity; }

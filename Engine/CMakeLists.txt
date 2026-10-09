@@ -44,28 +44,22 @@ target_include_directories(DRXEngine
         ${CMAKE_CURRENT_SOURCE_DIR}/Source
 )
 
-# OpenAL (3D audio). Without it the audio module runs silently.
-find_package(OpenAL QUIET)
-if(OpenAL_FOUND OR OPENAL_FOUND)
-    target_include_directories(DRXEngine PRIVATE ${OPENAL_INCLUDE_DIR})
-    target_link_libraries(DRXEngine PRIVATE ${OPENAL_LIBRARY})
-    target_compile_definitions(DRXEngine PRIVATE DRX_HAS_OPENAL=1)
-    message(STATUS "OpenAL found: ${OPENAL_LIBRARY}")
-else()
-    message(STATUS "OpenAL not found - audio disabled")
-endif()
+# OpenAL (3D audio). A missing audio device at runtime is handled; the library is required to build.
+find_package(OpenAL REQUIRED)
+target_include_directories(DRXEngine PRIVATE ${OPENAL_INCLUDE_DIR})
+target_link_libraries(DRXEngine PRIVATE ${OPENAL_LIBRARY})
 
 target_link_libraries(DRXEngine
     PUBLIC
         Vulkan::Vulkan
         glfw
         spdlog::spdlog
+        rapidjson
     PRIVATE
         bullet
         lua
         assimp
         stb
-        rapidjson
         EnTT
         vma
         Threads::Threads
