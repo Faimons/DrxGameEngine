@@ -7,6 +7,7 @@
  */
 
 #include "ShiftConfig.h"
+#include "ShiftSchedule.h"
 #include "ShiftTypes.h"
 #include "ShiftWeapons.h"
 
@@ -54,6 +55,8 @@ enum class WorldEventType : uint8 {
     EmptyClick,
     ReloadStart,
     ReloadDone,
+    ShiftWarning,   // siren: walls of the next shift glow red
+    ShiftStart,     // walls start moving
 };
 
 struct WorldEvent {
@@ -67,6 +70,13 @@ struct WorldEvent {
     float32 amount = 0.0f;
     bool headshot = false;
     bool hit = false;
+    bool crushed = false;
+};
+
+struct SimSegment {
+    MovingSegmentDef def;
+    SharedPtr<Physics::RigidBody> body;
+    float32 open_amount = 1.0f;
 };
 
 struct SpawnPoint {
@@ -86,6 +96,15 @@ public:
 
     // Level geometry (static boxes; size = full extents)
     void AddStaticBox(const Math::Vector3& center, const Math::Vector3& size);
+    // Kinematic wall segment that moves on the shift schedule; returns its index
+    size_t AddSegment(const MovingSegmentDef& segment);
+    const Array<SimSegment>& GetSegments() const { return segments_; }
+
+    // Round clock (drives the shift schedule)
+    void StartRound() { round_start_tick_ = tick_; UpdateSegments(); }
+    float32 GetRoundTime() const { return static_cast<float32>(tick_ - round_start_tick_) * dt_; }
+    ShiftPhase GetShiftPhase() const { return EvaluateShiftPhase(config_.shifts, GetRoundTime()); }
+
     void SetSpawn(Team team, const SpawnPoint& spawn) { spawns_[static_cast<size_t>(team)] = spawn; }
     const SpawnPoint& GetSpawn(Team team) const { return spawns_[static_cast<size_t>(team)]; }
 
@@ -105,7 +124,7 @@ public:
 
     // Applies damage with all rules (protection, death); returns true when the target died
     bool ApplyDamage(PlayerId target, PlayerId source, float32 amount, bool headshot);
-    void Kill(PlayerId target, PlayerId source);
+    void Kill(PlayerId target, PlayerId source, bool crushed = false);
 
     Array<WorldEvent> TakeEvents();
     Physics::PhysicsWorld& GetPhysics() { return physics_; }
@@ -113,6 +132,8 @@ public:
 
 private:
     void StepPlayer(SimPlayer& player);
+    void UpdateSegments();
+    void CheckCrushed(SimPlayer& player);
     void Move(SimPlayer& player);
     void Fire(SimPlayer& player, const WeaponDef& weapon, uint32 shot_index);
     void Respawn(SimPlayer& player);
@@ -123,6 +144,8 @@ private:
     Physics::PhysicsWorld physics_;
     std::map<PlayerId, UniquePtr<SimPlayer>> players_;
     Array<SharedPtr<Physics::RigidBody>> statics_;
+    Array<SimSegment> segments_;
+    uint32 round_start_tick_ = 0;
     SpawnPoint spawns_[2];
     Array<WorldEvent> events_;
     PlayerId next_id_ = 1;

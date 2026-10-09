@@ -4,6 +4,7 @@
 add_library(ShiftCore STATIC
     Source/Core/ShiftConfig.cpp
     Source/Core/ShiftLevel.cpp
+    Source/Core/ShiftSchedule.cpp
     Source/Core/ShiftWeapons.cpp
     Source/Core/ShiftWorld.cpp
 )

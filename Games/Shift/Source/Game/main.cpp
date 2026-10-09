@@ -1,5 +1,5 @@
 /**
- * SHIFT - Game client (phase 1 and 2: movement, pistol, target dummy)
+ * SHIFT - Game client (phases 1 to 3: movement, pistol, target dummy, moving wall)
  *
  * Controls: mouse look, WASD move, Space jump, LMB fire, R reload,
  *           Esc releases the mouse (Esc again quits), click to capture, F11 fullscreen, F12 screenshot
@@ -37,6 +37,7 @@ Vector4 SurfaceColor(Surface surface) {
         case Surface::Step: return {0.6f, 0.75f, 0.6f, 1.0f};
         case Surface::SpawnA: return {0.2f, 0.45f, 1.0f, 1.0f};
         case Surface::SpawnB: return {1.0f, 0.3f, 0.25f, 1.0f};
+        case Surface::Moving: return {0.55f, 0.6f, 0.75f, 1.0f};
     }
     return {1, 1, 1, 1};
 }
@@ -122,6 +123,7 @@ protected:
 
     void OnRender(Renderer::SceneRenderer& renderer) override {
         for (const RenderBox& box : level_boxes_) renderer.DrawMesh(box.mesh, box.transform, box.material);
+        DrawSegments(renderer);
 
         for (const auto& [id, player] : world_.GetPlayers()) {
             if (id == local_id_ || !player->alive) continue;
@@ -154,9 +156,14 @@ protected:
             DrawCrosshair(ui, w * 0.5f, h * 0.5f);
         } else {
             ui.DrawRect({0, 0, w, h}, {0, 0, 0, 0.45f});
+            if (crushed_) {
+                const String cause = "Zerquetscht";
+                ui.DrawText(cause, (w - ui.GetTextWidth(cause, 56.0f)) * 0.5f, h * 0.3f, {1.0f, 0.35f, 0.3f, 1.0f}, 56.0f);
+            }
             const String text = fmt::format("Respawn in {:.1f} s", std::max(0.0f, me->respawn_timer));
             ui.DrawText(text, (w - ui.GetTextWidth(text, 56.0f)) * 0.5f, h * 0.4f, {1, 1, 1, 1}, 56.0f);
         }
+        DrawShiftTimer(ui, w);
 
         // Health and ammo
         ui.DrawRect({20, h - 76, 210, 56}, {0, 0, 0, 0.5f});
@@ -239,6 +246,8 @@ private:
                 if (event.target == local_id_) damage_flash_ = 0.3f;
                 break;
             case WorldEventType::Kill:
+                if (event.target == local_id_) crushed_ = event.crushed;
+                if (event.crushed) audio.PlayOneShot(crush_sound_, event.to, 1.0f);
                 if (event.target == dummy_id_ && event.source == local_id_) {
                     last_kill_hits_ = dummy_hits_;
                     last_kill_time_ = static_cast<float32>(event.tick - dummy_first_hit_tick_) * world_.GetTickInterval();
@@ -256,6 +265,14 @@ private:
             case WorldEventType::ReloadStart:
             case WorldEventType::ReloadDone:
                 if (event.source == local_id_) audio.PlayOneShot2D(click_sound_, 0.4f, 0.7f);
+                break;
+            case WorldEventType::ShiftWarning:
+                audio.PlayOneShot2D(siren_sound_, 0.7f);
+                break;
+            case WorldEventType::ShiftStart:
+                for (const SimSegment& segment : world_.GetSegments()) {
+                    audio.PlayOneShot(rumble_sound_, segment.def.closed_center, 0.9f);
+                }
                 break;
         }
     }
@@ -302,6 +319,43 @@ private:
         }
     }
 
+    // Segments are drawn at the interpolated round time so they move smoothly between ticks
+    void DrawSegments(Renderer::SceneRenderer& renderer) {
+        const float32 time = world_.GetRoundTime() - world_.GetTickInterval() * (1.0f - GetInterpolationAlpha());
+        const ShiftPhase phase = world_.GetShiftPhase();
+        const auto& segments = world_.GetSegments();
+        for (size_t i = 0; i < segments.size() && i < segment_meshes_.size(); ++i) {
+            const MovingSegmentDef& def = segments[i].def;
+            const float32 open = SegmentOpenAmount(config_.shifts, def, time);
+            Renderer::Material material;
+            material.albedo = grid_texture_;
+            material.color = SurfaceColor(Surface::Moving);
+            if (phase.warning || phase.moving) {
+                // Pulsing red: this wall moves in the next shift
+                const float32 pulse = 0.5f + 0.5f * std::sin(static_cast<float32>(GetTime()) * 8.0f);
+                material.color = {0.9f, 0.25f, 0.2f, 1.0f};
+                material.emissive = {1.0f, 0.1f, 0.05f};
+                material.emissive_strength = 0.6f + 1.4f * pulse;
+            }
+            renderer.DrawMesh(segment_meshes_[i], Matrix4::Translation(SegmentCenter(def, open)), material);
+        }
+    }
+
+    void DrawShiftTimer(UI::UIContext& ui, float32 w) const {
+        const ShiftPhase phase = world_.GetShiftPhase();
+        String text;
+        Vector4 color{1, 1, 1, 0.9f};
+        if (phase.moving) {
+            text = "VERSCHIEBUNG";
+            color = {1.0f, 0.3f, 0.25f, 1.0f};
+        } else {
+            text = fmt::format("Verschiebung in {:.0f} s", std::ceil(phase.time_to_next));
+            if (phase.warning) color = {1.0f, 0.3f, 0.25f, 1.0f};
+        }
+        ui.DrawRect({w * 0.5f - 160, 12, 320, 40}, {0, 0, 0, 0.5f});
+        ui.DrawText(text, (w - ui.GetTextWidth(text, 28.0f)) * 0.5f, 18, color, 28.0f);
+    }
+
     void CreateGraphics() {
         Renderer::SceneRenderer& renderer = GetRenderer();
         const auto grid = Renderer::MeshBuilder::GridTexture(256, 4, {0.82f, 0.82f, 0.84f, 1.0f},
@@ -319,6 +373,12 @@ private:
             render.material.color = SurfaceColor(box.surface);
             render.material.cast_shadows = box.casts_shadow;
             level_boxes_.push_back(render);
+        }
+
+        for (const MovingSegmentDef& segment : level_.segments) {
+            const MeshHandle mesh = renderer.CreateMesh(Renderer::MeshBuilder::Box(segment.size), "Segment");
+            meshes_.push_back(mesh);
+            segment_meshes_.push_back(mesh);
         }
 
         const float32 r = config_.player.radius;
@@ -341,6 +401,20 @@ private:
         kill.duration = 0.25f;
         kill.volume = 0.6f;
         kill_sound_ = audio.CreateClip("shift:kill", Audio::Synth::Tone(kill));
+        siren_sound_ = audio.CreateClip("shift:siren", Audio::Synth::Alarm(config_.shifts.warning_time));
+        Audio::Synth::ToneParams rumble;
+        rumble.waveform = Audio::Synth::Waveform::Noise;
+        rumble.duration = config_.shifts.move_duration;
+        rumble.volume = 0.8f;
+        rumble.lowpass = 180.0f;
+        rumble.envelope = {0.3f, 0.0f, 1.0f, 0.5f};
+        rumble_sound_ = audio.CreateClip("shift:rumble", Audio::Synth::Tone(rumble));
+        Audio::Synth::ToneParams crush;
+        crush.waveform = Audio::Synth::Waveform::Noise;
+        crush.duration = 0.5f;
+        crush.lowpass = 600.0f;
+        crush.envelope = {0.002f, 0.1f, 0.3f, 0.35f};
+        crush_sound_ = audio.CreateClip("shift:crush", Audio::Synth::Tone(crush));
     }
 
     ShiftConfig config_;
@@ -371,6 +445,9 @@ private:
     MeshHandle body_mesh_;
     MeshHandle head_mesh_;
     SharedPtr<Audio::AudioClip> shot_sound_, hit_sound_, headshot_sound_, click_sound_, kill_sound_;
+    SharedPtr<Audio::AudioClip> siren_sound_, rumble_sound_, crush_sound_;
+    Array<MeshHandle> segment_meshes_;
+    bool crushed_ = false;
 };
 
 } // namespace

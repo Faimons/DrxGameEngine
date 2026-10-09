@@ -20,6 +20,7 @@ void Level::Apply(ShiftWorld& world) const {
     for (const LevelBox& box : boxes) {
         if (box.collision) world.AddStaticBox(box.center, box.size);
     }
+    for (const MovingSegmentDef& segment : segments) world.AddSegment(segment);
     world.SetSpawn(Team::A, spawns[0]);
     world.SetSpawn(Team::B, spawns[1]);
 }
@@ -43,12 +44,37 @@ Level BuildTestRoom() {
 
     // Cover blocks (waist and head height), a jumpable ledge (0.9 m) and a step row (0.25 m each)
     level.AddBox({-3.0f, 0.5f, 0.0f}, {1.5f, 1.0f, 0.6f}, Surface::Cover);
-    level.AddBox({3.0f, 0.9f, -1.5f}, {0.6f, 1.8f, 1.5f}, Surface::Cover);
+    level.AddBox({3.0f, 0.9f, -0.3f}, {0.6f, 1.8f, 1.5f}, Surface::Cover);
     level.AddBox({-4.5f, 0.45f, -4.0f}, {2.0f, 0.9f, 2.0f}, Surface::Cover);
     for (int i = 0; i < 4; ++i) {
         const float32 h = 0.25f * static_cast<float32>(i + 1);
         level.AddBox({4.6f, h * 0.5f, 2.0f + 0.4f * static_cast<float32>(i)}, {1.6f, h, 0.4f}, Surface::Step);
     }
+
+    // Divider at z = -2 with a 3 m doorway (x -1.5 .. 1.5). The door segment runs in a track just
+    // north of the divider and parks behind its east part; a stop block ends the track in the west,
+    // so a player caught in the closing doorway is crushed against it.
+    constexpr float32 kDividerZ = -2.0f;
+    constexpr float32 kDividerThickness = 0.4f;
+    constexpr float32 kDoorHalf = 1.5f;
+    const float32 west_length = half - kDoorHalf;
+    level.AddBox({-kDoorHalf - west_length * 0.5f, kHeight * 0.5f, kDividerZ}, {west_length, kHeight, kDividerThickness},
+                 Surface::Wall);
+    level.AddBox({kDoorHalf + west_length * 0.5f, kHeight * 0.5f, kDividerZ}, {west_length, kHeight, kDividerThickness},
+                 Surface::Wall);
+
+    constexpr float32 kTrackZ = kDividerZ - kDividerThickness * 0.5f - 0.25f;   // segment centre line
+    constexpr float32 kSegmentDepth = 0.4f;
+    constexpr float32 kSegmentWidth = 3.4f;
+    level.AddBox({-kDoorHalf - 0.2f - 0.5f, kHeight * 0.5f, kTrackZ}, {1.0f, kHeight, kSegmentDepth}, Surface::Wall);
+
+    MovingSegmentDef door;
+    door.name = "Testtuer";
+    door.size = {kSegmentWidth, kHeight, kSegmentDepth};
+    door.closed_center = {-kDoorHalf - 0.2f + kSegmentWidth * 0.5f, kHeight * 0.5f, kTrackZ};   // touches the stop
+    door.open_center = door.closed_center + Vector3(kSegmentWidth, 0.0f, 0.0f);
+    door.starts_open = true;
+    level.segments.push_back(door);
 
     // Spawn markers (no collision)
     LevelBox marker_a{{0, 0.01f, 4.5f}, {1.5f, 0.02f, 1.5f}, Surface::SpawnA, false, false};

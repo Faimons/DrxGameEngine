@@ -18,7 +18,8 @@ enum class Surface : uint8 {
     Cover,
     Step,
     SpawnA,
-    SpawnB
+    SpawnB,
+    Moving
 };
 
 struct LevelBox {
@@ -32,16 +33,18 @@ struct LevelBox {
 struct Level {
     String name;
     Array<LevelBox> boxes;
+    Array<MovingSegmentDef> segments;
     SpawnPoint spawns[2];
 
     void AddBox(const Math::Vector3& center, const Math::Vector3& size, Surface surface);
-    // Adds the collision of every box and the spawns to the world
+    // Adds the collision of every box, the moving segments and the spawns to the world
     void Apply(ShiftWorld& world) const;
 };
 
 /**
- * Phase 1/2 test room: 12 x 12 x 4 m closed graybox with cover, a ledge, a step row and a
- * shooting lane. Team A spawns south, the target dummy (team B) stands north.
+ * Test room (phases 1 to 3): 12 x 12 x 4 m closed graybox with cover, a step row and a divider
+ * wall whose 3 m doorway is closed and opened by a moving segment on the shift schedule.
+ * Team A spawns south, the target dummy (team B) stands north behind the doorway.
  */
 Level BuildTestRoom();
 

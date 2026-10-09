@@ -60,6 +60,7 @@ bool ShiftWorld::Initialize(const ShiftConfig& config) {
     config_ = config;
     dt_ = config.GetTickInterval();
     tick_ = 0;
+    round_start_tick_ = 0;
     next_id_ = 1;
     return physics_.Initialize({0.0f, -config.player.gravity, 0.0f});
 }
@@ -68,6 +69,7 @@ void ShiftWorld::Shutdown() {
     for (auto& [id, player] : players_) physics_.DestroyCharacterController(player->controller);
     players_.clear();
     statics_.clear();
+    segments_.clear();
     events_.clear();
     physics_.Shutdown();
 }
@@ -94,7 +96,7 @@ PlayerId ShiftWorld::AddPlayer(Team team, bool is_dummy, const WeaponDef* primar
     settings.gravity = config_.player.gravity;
     settings.user_data = player.get();
     // Pushed out until less than the player width remains, then crushed
-    settings.crush_tolerance = 0.01f;
+    settings.crush_tolerance = 0.005f;
     player->controller = physics_.CreateCharacterController(settings, GetSpawn(team).position);
     if (!player->controller) {
         DRX_LOG_ERROR("Could not create a character for player {}", player->id);
@@ -151,11 +153,50 @@ Array<WorldEvent> ShiftWorld::TakeEvents() {
     return events;
 }
 
+size_t ShiftWorld::AddSegment(const MovingSegmentDef& def) {
+    SimSegment segment;
+    segment.def = def;
+    segment.open_amount = SegmentOpenAmount(config_.shifts, def, GetRoundTime());
+
+    Physics::RigidBodyDesc desc;
+    desc.type = Physics::RigidBodyType::Kinematic;
+    desc.shape.type = Physics::CollisionShapeType::Box;
+    desc.shape.half_extents = def.size * 0.5f;
+    desc.initial_transform.position = SegmentCenter(def, segment.open_amount);
+    desc.layer = Physics::CollisionLayer::Kinematic;
+    segment.body = physics_.CreateRigidBody(desc);
+    if (!segment.body) DRX_LOG_ERROR("Could not create wall segment '{}'", def.name);
+    segments_.push_back(std::move(segment));
+    return segments_.size() - 1;
+}
+
+void ShiftWorld::UpdateSegments() {
+    const float32 round_time = GetRoundTime();
+    for (SimSegment& segment : segments_) {
+        segment.open_amount = SegmentOpenAmount(config_.shifts, segment.def, round_time);
+        if (!segment.body) continue;
+        Math::Transform transform;
+        transform.position = SegmentCenter(segment.def, segment.open_amount);
+        segment.body->SetTransform(transform);
+    }
+}
+
 void ShiftWorld::Step() {
+    const ShiftPhase before = GetShiftPhase();
     ++tick_;
+    const ShiftPhase after = GetShiftPhase();
+    if (after.warning && !before.warning) Emit(MakeEvent(WorldEventType::ShiftWarning, kInvalidPlayer));
+    if (after.moving && !before.moving) Emit(MakeEvent(WorldEventType::ShiftStart, kInvalidPlayer));
+
+    // Walls move first; characters are then pushed out (or crushed) by their own move
+    UpdateSegments();
     // Fixed order (by id) keeps the simulation deterministic
     for (auto& [id, player] : players_) StepPlayer(*player);
     physics_.Step(dt_);
+}
+
+void ShiftWorld::CheckCrushed(SimPlayer& player) {
+    if (player.alive && player.controller->IsCrushed()) Kill(player.id, kInvalidPlayer, true);
 }
 
 void ShiftWorld::StepPlayer(SimPlayer& player) {
@@ -168,6 +209,7 @@ void ShiftWorld::StepPlayer(SimPlayer& player) {
 
     if (player.is_dummy) {
         player.controller->Move(Math::Vector3::Zero, 0.0f, dt_);
+        CheckCrushed(player);
         return;
     }
 
@@ -175,6 +217,8 @@ void ShiftWorld::StepPlayer(SimPlayer& player) {
     player.yaw = std::fmod(input.yaw, 360.0f);
     player.pitch = std::clamp(input.pitch, -kMaxPitch, kMaxPitch);
     Move(player);
+    CheckCrushed(player);
+    if (!player.alive) return;
 
     WeaponState& weapon = player.ActiveWeapon();
     const WeaponTickResult result =
@@ -258,7 +302,7 @@ bool ShiftWorld::ApplyDamage(PlayerId target_id, PlayerId source, float32 amount
     return true;
 }
 
-void ShiftWorld::Kill(PlayerId target_id, PlayerId source) {
+void ShiftWorld::Kill(PlayerId target_id, PlayerId source, bool crushed) {
     SimPlayer* target = GetPlayer(target_id);
     if (!target || !target->alive) return;
     target->health = 0.0f;
@@ -268,6 +312,7 @@ void ShiftWorld::Kill(PlayerId target_id, PlayerId source) {
 
     WorldEvent kill = MakeEvent(WorldEventType::Kill, source, target_id);
     kill.to = target->GetFeet();
+    kill.crushed = crushed;
     Emit(kill);
 }
 
