@@ -12,6 +12,11 @@ on:
       - '.github/workflows/shift-windows.yml'
   workflow_dispatch:
 
+# A newer push to the same branch replaces a running build
+concurrency:
+  group: shift-windows-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     runs-on: windows-latest
