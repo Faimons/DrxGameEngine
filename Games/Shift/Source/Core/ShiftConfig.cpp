@@ -129,6 +129,10 @@ void ShiftConfig::Load(const Config& config) {
     r.Number("round.round_time", round.round_time, 10.0f, 7200.0f);
     r.Number("round.freeze_time", round.freeze_time, 0.0f, 120.0f);
     r.Number("round.core_return_time", round.core_return_time, 0.0f, 600.0f);
+    r.Number("round.core_pickup_range", round.core_pickup_range, 0.3f, 10.0f);
+    r.Number("round.round_end_delay", round.round_end_delay, 0.5f, 120.0f);
+    r.Number("round.match_end_delay", round.match_end_delay, 0.5f, 600.0f);
+    round.map = config.GetString("round.map", round.map);
 
     r.Number("shifts.interval", shifts.interval, 5.0f, 600.0f);
     r.Number("shifts.warning_time", shifts.warning_time, 0.0f, shifts.interval);
@@ -154,6 +158,7 @@ void ShiftConfig::Load(const Config& config) {
     r.Number("net.simulated_latency_ms", net.simulated_latency_ms, 0.0f, 2000.0f);
     r.Number("net.simulated_jitter_ms", net.simulated_jitter_ms, 0.0f, 1000.0f);
     r.Number("net.simulated_loss", net.simulated_loss, 0.0f, 1.0f);
+    net.server_address = config.GetString("net.server_address", net.server_address);
 }
 
 const WeaponDef* ShiftConfig::FindWeapon(const String& id) const {

@@ -4,36 +4,76 @@
 
 #include "ShiftLevel.h"
 
+#include "Core/Public/Log.h"
+
+#include <utility>
+
 namespace Shift {
+
+namespace {
+
+constexpr float32 kHeight = 4.0f;
+constexpr float32 kWall = 0.5f;
+
+MovingSegmentDef SlidingSegment(const String& name, SegmentGroup group, const Math::Vector3& center,
+                                const Math::Vector3& size, const Math::Vector3& move) {
+    MovingSegmentDef def;
+    def.name = name;
+    def.group = group;
+    def.center = center;
+    def.size = size;
+    def.move = move;
+    return def;
+}
+
+// Door or gate that sinks into the floor when open (state 1)
+MovingSegmentDef SinkingDoor(const String& name, SegmentGroup group, float32 x0, float32 x1, float32 z0, float32 z1) {
+    const Math::Vector3 size(x1 - x0, kHeight, z1 - z0);
+    const Math::Vector3 center((x0 + x1) * 0.5f, kHeight * 0.5f, (z0 + z1) * 0.5f);
+    return SlidingSegment(name, group, center, size, {0.0f, -(kHeight + 0.1f), 0.0f});
+}
+
+} // namespace
 
 void Level::AddBox(const Math::Vector3& center, const Math::Vector3& size, Surface surface) {
     LevelBox box;
     box.center = center;
     box.size = size;
     box.surface = surface;
-    // The ceiling would put the whole room into the sun shadow
+    // The ceiling would put the whole level into the sun shadow
     box.casts_shadow = surface != Surface::Ceiling;
     boxes.push_back(box);
+}
+
+void Level::AddBlock(float32 x0, float32 x1, float32 z0, float32 z1, Surface surface, float32 y0, float32 y1) {
+    if (x1 <= x0 || z1 <= z0 || y1 <= y0) {
+        DRX_LOG_WARNING("Level '{}': empty block ignored", name);
+        return;
+    }
+    AddBox({(x0 + x1) * 0.5f, (y0 + y1) * 0.5f, (z0 + z1) * 0.5f}, {x1 - x0, y1 - y0, z1 - z0}, surface);
 }
 
 void Level::Apply(ShiftWorld& world) const {
     for (const LevelBox& box : boxes) {
         if (box.collision) world.AddStaticBox(box.center, box.size);
     }
+    world.SetShiftMode(shift_mode);
     for (const MovingSegmentDef& segment : segments) world.AddSegment(segment);
     world.SetSpawn(Team::A, spawns[0]);
     world.SetSpawn(Team::B, spawns[1]);
+    world.SetExit(Team::A, exits[0]);
+    world.SetExit(Team::B, exits[1]);
+    if (has_core) world.SetCoreHome(core_home);
 }
 
 Level BuildTestRoom() {
     using Math::Vector3;
     constexpr float32 kSize = 12.0f;
-    constexpr float32 kHeight = 4.0f;
-    constexpr float32 kWall = 0.5f;
     const float32 half = kSize * 0.5f;
 
     Level level;
     level.name = "Testraum";
+    level.shift_mode = ShiftMode::ToggleAll;
 
     level.AddBox({0, -0.25f, 0}, {kSize + 2 * kWall, 0.5f, kSize + 2 * kWall}, Surface::Floor);
     level.AddBox({0, kHeight + 0.25f, 0}, {kSize + 2 * kWall, 0.5f, kSize + 2 * kWall}, Surface::Ceiling);
@@ -68,23 +108,206 @@ Level BuildTestRoom() {
     constexpr float32 kSegmentWidth = 3.4f;
     level.AddBox({-kDoorHalf - 0.2f - 0.5f, kHeight * 0.5f, kTrackZ}, {1.0f, kHeight, kSegmentDepth}, Surface::Wall);
 
-    MovingSegmentDef door;
-    door.name = "Testtuer";
-    door.size = {kSegmentWidth, kHeight, kSegmentDepth};
-    door.closed_center = {-kDoorHalf - 0.2f + kSegmentWidth * 0.5f, kHeight * 0.5f, kTrackZ};   // touches the stop
-    door.open_center = door.closed_center + Vector3(kSegmentWidth, 0.0f, 0.0f);
-    door.starts_open = true;
-    level.segments.push_back(door);
+    // State 0 = closed (touches the stop), state 1 = open; the door starts open
+    level.segments.push_back(SlidingSegment("Testtuer", SegmentGroup::Toggle,
+                                            {-kDoorHalf - 0.2f + kSegmentWidth * 0.5f, kHeight * 0.5f, kTrackZ},
+                                            {kSegmentWidth, kHeight, kSegmentDepth}, {kSegmentWidth, 0.0f, 0.0f}));
 
     // Spawn markers (no collision)
-    LevelBox marker_a{{0, 0.01f, 4.5f}, {1.5f, 0.02f, 1.5f}, Surface::SpawnA, false, false};
-    LevelBox marker_b{{0, 0.01f, -4.5f}, {1.5f, 0.02f, 1.5f}, Surface::SpawnB, false, false};
-    level.boxes.push_back(marker_a);
-    level.boxes.push_back(marker_b);
+    level.boxes.push_back({{0, 0.01f, 4.5f}, {1.5f, 0.02f, 1.5f}, Surface::SpawnA, false, false});
+    level.boxes.push_back({{0, 0.01f, -4.5f}, {1.5f, 0.02f, 1.5f}, Surface::SpawnB, false, false});
 
     level.spawns[0] = {Vector3(0, 0, 4.5f), 0.0f};      // looks north (-Z)
     level.spawns[1] = {Vector3(0, 0, -4.5f), 180.0f};   // looks south
     return level;
+}
+
+Level BuildArena() {
+    using Math::Vector3;
+    Level level;
+    level.name = "Arena";
+    level.shift_mode = ShiftMode::Patterns;
+
+    // Interior extents (walls are added outside of them)
+    constexpr float32 kRoomX0 = 24.0f, kRoomX1 = 36.0f;    // start rooms (mirrored for A)
+    constexpr float32 kRoomZ = 6.0f;
+    constexpr float32 kWingX = 28.0f;                      // wings run from -28 to 28
+    constexpr float32 kNorthZ0 = -12.5f, kNorthZ1 = -8.5f; // north wing 4 m
+    constexpr float32 kSouthZ0 = 8.5f, kSouthZ1 = 11.5f;   // south wing 3 m
+    constexpr float32 kCore = 8.0f;                        // core chamber -8 .. 8
+    constexpr float32 kDoor = 1.5f;                        // door half width
+    constexpr float32 kLinkX0 = 24.0f, kLinkX1 = 28.0f;    // start room <-> wing links (mirrored)
+    constexpr float32 kMachineX = 15.5f;                   // machine room centre (z = 0)
+    constexpr float32 kMachineLinkX0 = 14.0f, kMachineLinkX1 = 17.0f;
+
+    // Floor and ceiling over everything
+    level.AddBlock(-37.0f, 37.0f, -13.5f, 13.5f, Surface::Floor, -0.5f, 0.0f);
+    level.AddBlock(-37.0f, 37.0f, -13.5f, 13.5f, Surface::Ceiling, kHeight, kHeight + 0.5f);
+
+    for (const float32 side : {-1.0f, 1.0f}) {
+        // Mirror helper: x range on this side
+        auto X = [side](float32 a, float32 b, float32& x0, float32& x1) {
+            x0 = side < 0.0f ? -b : a;
+            x1 = side < 0.0f ? -a : b;
+        };
+        float32 x0, x1;
+
+        // --- Start room ---
+        X(kRoomX0 - kWall, kRoomX1 + kWall, x0, x1);
+        // North and south walls with a door to the wing link
+        float32 lx0, lx1;
+        X(kLinkX0, kLinkX1, lx0, lx1);
+        for (const float32 z : {-kRoomZ - kWall, kRoomZ}) {
+            level.AddBlock(x0, lx0, z, z + kWall, Surface::Wall);
+            level.AddBlock(lx1, x1, z, z + kWall, Surface::Wall);
+        }
+        // Inner (towards the core) and outer walls
+        X(kRoomX0 - kWall, kRoomX0, x0, x1);
+        level.AddBlock(x0, x1, -kRoomZ - kWall, kRoomZ + kWall, Surface::Wall);
+        X(kRoomX1, kRoomX1 + kWall, x0, x1);
+        level.AddBlock(x0, x1, -kRoomZ - kWall, kRoomZ + kWall, Surface::Wall);
+
+        // Links from the start room to both wings (2 m), side walls only
+        for (const auto& [za, zb] : {std::pair<float32, float32>{kNorthZ1 + kWall, -kRoomZ - kWall},
+                                     std::pair<float32, float32>{kRoomZ + kWall, kSouthZ0 - kWall}}) {
+            X(kLinkX0 - kWall, kLinkX0, x0, x1);
+            level.AddBlock(x0, x1, za, zb, Surface::Wall);
+            X(kLinkX1, kLinkX1 + kWall, x0, x1);
+            level.AddBlock(x0, x1, za, zb, Surface::Wall);
+        }
+
+        // Cover in the start room
+        X(29.0f, 30.2f, x0, x1);
+        level.AddBlock(x0, x1, -3.5f, -1.5f, Surface::Cover, 0.0f, 1.1f);
+        level.AddBlock(x0, x1, 1.5f, 3.5f, Surface::Cover, 0.0f, 1.1f);
+
+        // Wing end walls
+        X(kWingX, kWingX + kWall, x0, x1);
+        level.AddBlock(x0, x1, kNorthZ0, kNorthZ1, Surface::Wall);
+        level.AddBlock(x0, x1, kSouthZ0, kSouthZ1, Surface::Wall);
+
+        // Wing cover: crates in the long north wing, low blocks in the narrow south wing
+        X(18.5f, 19.7f, x0, x1);
+        level.AddBlock(x0, x1, -11.6f, -10.4f, Surface::Cover, 0.0f, 1.2f);
+        X(5.0f, 6.0f, x0, x1);
+        level.AddBlock(x0, x1, 10.6f, 11.5f, Surface::Cover, 0.0f, 1.0f);
+        X(21.0f, 22.0f, x0, x1);
+        level.AddBlock(x0, x1, 8.5f, 9.4f, Surface::Cover, 0.0f, 1.0f);
+
+        // Gates across the wings at x = +-12 (pattern 1); state 1 = open
+        X(11.8f, 12.2f, x0, x1);
+        level.segments.push_back(SinkingDoor(side < 0.0f ? "Nordtor West" : "Nordtor Ost", SegmentGroup::NorthGates,
+                                             x0, x1, kNorthZ0, kNorthZ1));
+        level.segments.push_back(SinkingDoor(side < 0.0f ? "Suedtor West" : "Suedtor Ost", SegmentGroup::SouthGates,
+                                             x0, x1, kSouthZ0, kSouthZ1));
+
+        // Core chamber pillars
+        level.AddBlock(side * 4.0f - 0.6f, side * 4.0f + 0.6f, -4.6f, -3.4f, Surface::Wall);
+        level.AddBlock(side * 4.0f - 0.6f, side * 4.0f + 0.6f, 3.4f, 4.6f, Surface::Wall);
+        level.AddBlock(side * 5.5f - 0.3f, side * 5.5f + 0.3f, -0.9f, 0.9f, Surface::Cover, 0.0f, 1.0f);
+    }
+
+    // --- Wing walls ---
+    const float32 wing_x0 = -kWingX - kWall, wing_x1 = kWingX + kWall;
+    level.AddBlock(wing_x0, wing_x1, kNorthZ0 - kWall, kNorthZ0, Surface::Wall);   // north outer
+    level.AddBlock(wing_x0, wing_x1, kSouthZ1, kSouthZ1 + kWall, Surface::Wall);   // south outer
+    // Inner walls (towards the core) with openings: start room links, core doors, machine room links
+    struct Gap {
+        float32 x0, x1;
+    };
+    const Gap gaps[] = {{-kLinkX1, -kLinkX0}, {-kDoor, kDoor}, {kMachineLinkX0, kMachineLinkX1}, {kLinkX0, kLinkX1}};
+    for (const float32 z : {kNorthZ1, kSouthZ0 - kWall}) {
+        float32 x = wing_x0;
+        for (const Gap& gap : gaps) {
+            level.AddBlock(x, gap.x0, z, z + kWall, Surface::Wall);
+            x = gap.x1;
+        }
+        level.AddBlock(x, wing_x1, z, z + kWall, Surface::Wall);
+    }
+
+    // --- Core chamber: west wall solid, east wall with the machine room door ---
+    level.AddBlock(-kCore - kWall, -kCore, -kCore, kCore, Surface::Wall);
+    level.AddBlock(kCore, kCore + kWall, -kCore, -kDoor, Surface::Wall);
+    level.AddBlock(kCore, kCore + kWall, kDoor, kCore, Surface::Wall);
+    // Core doors (pattern 3): wing doors start open, the machine room door starts closed
+    level.segments.push_back(SinkingDoor("Kerntuer Nord", SegmentGroup::CoreDoorsNS, -kDoor, kDoor, kNorthZ1 + 0.05f,
+                                         kNorthZ1 + kWall - 0.05f));
+    level.segments.push_back(SinkingDoor("Kerntuer Sued", SegmentGroup::CoreDoorsNS, -kDoor, kDoor,
+                                         kSouthZ0 - kWall + 0.05f, kSouthZ0 - 0.05f));
+    level.segments.push_back(SinkingDoor("Kerntuer Ost", SegmentGroup::CoreDoorE, kCore + 0.05f, kCore + kWall - 0.05f,
+                                         -kDoor, kDoor));
+
+    // --- Machine room: thick static shell, rotating inner walls (pattern 2) ---
+    // The shell is thick enough to hide the corners of the rotating walls; passages lead west
+    // (core), north and south (wings).
+    constexpr float32 kMachineHalf = 5.0f;
+    const float32 mx0 = kMachineX - kMachineHalf, mx1 = kMachineX + kMachineHalf;
+    for (const float32 sign : {-1.0f, 1.0f}) {   // north and south shell around the wing passages
+        const float32 za = sign < 0.0f ? kNorthZ1 + kWall : kMachineHalf;
+        const float32 zb = sign < 0.0f ? -kMachineHalf : kSouthZ0 - kWall;
+        level.AddBlock(kCore + kWall, kMachineLinkX0, za, zb, Surface::Wall);
+        level.AddBlock(kMachineLinkX1, mx1 + 2.0f, za, zb, Surface::Wall);
+    }
+    level.AddBlock(kCore + kWall, mx0, -kMachineHalf, -kDoor, Surface::Wall);   // west shell
+    level.AddBlock(kCore + kWall, mx0, kDoor, kMachineHalf, Surface::Wall);
+    level.AddBlock(mx1, mx1 + 2.0f, -kMachineHalf, kMachineHalf, Surface::Wall);   // east shell
+
+    // Rotating square (half 4.9, walls 0.4): openings west and south, after -90 degrees north and west
+    {
+        constexpr float32 kInner = 4.9f;
+        constexpr float32 kThick = 0.4f;
+        const float32 face = kInner - kThick * 0.5f;           // wall centre line
+        const float32 piece = (2.0f * kInner - 2.0f * kDoor) * 0.5f;
+        const Vector3 pivot(kMachineX, kHeight * 0.5f, 0.0f);
+        auto add = [&](const char* name, const Vector3& offset, const Vector3& size) {
+            MovingSegmentDef def;
+            def.name = name;
+            def.group = SegmentGroup::MachineRoom;
+            def.center = pivot + offset;
+            def.size = size;
+            def.rotate = -90.0f;
+            def.pivot = pivot;
+            level.segments.push_back(def);
+        };
+        add("Maschine N", {0.0f, 0.0f, -face}, {2.0f * kInner, kHeight, kThick});
+        add("Maschine O", {face, 0.0f, 0.0f}, {kThick, kHeight, 2.0f * kInner - 2.0f * kThick});
+        add("Maschine W1", {-face, 0.0f, -kDoor - piece * 0.5f}, {kThick, kHeight, piece - kThick});
+        add("Maschine W2", {-face, 0.0f, kDoor + piece * 0.5f}, {kThick, kHeight, piece - kThick});
+        add("Maschine S1", {-kDoor - piece * 0.5f, 0.0f, face}, {piece, kHeight, kThick});
+        add("Maschine S2", {kDoor + piece * 0.5f, 0.0f, face}, {piece, kHeight, kThick});
+    }
+
+    // --- North wing side panels (pattern 4): move 1 m in from each side; state 1 = retracted ---
+    {
+        constexpr float32 kThick = 0.4f;
+        const float32 y = kHeight * 0.5f;
+        level.segments.push_back(SlidingSegment("Engpass Nord", SegmentGroup::NorthPanels,
+                                                {0.0f, y, kNorthZ0 - kWall * 0.5f + 1.0f}, {20.0f, kHeight, kThick},
+                                                {0.0f, 0.0f, -1.0f}));
+        for (const float32 side : {-1.0f, 1.0f}) {
+            level.segments.push_back(SlidingSegment(side < 0.0f ? "Engpass Sued West" : "Engpass Sued Ost",
+                                                    SegmentGroup::NorthPanels,
+                                                    {side * 6.0f, y, kNorthZ1 + kWall * 0.5f - 1.0f},
+                                                    {8.0f, kHeight, kThick}, {0.0f, 0.0f, 1.0f}));
+        }
+    }
+
+    // Spawn markers and exit zones (3 x 3 m at the far end of each start room)
+    level.boxes.push_back({{-30.0f, 0.01f, 0.0f}, {1.5f, 0.02f, 1.5f}, Surface::SpawnA, false, false});
+    level.boxes.push_back({{30.0f, 0.01f, 0.0f}, {1.5f, 0.02f, 1.5f}, Surface::SpawnB, false, false});
+    level.spawns[0] = {Vector3(-30.0f, 0.0f, 0.0f), 90.0f};    // looks east
+    level.spawns[1] = {Vector3(30.0f, 0.0f, 0.0f), 270.0f};    // looks west
+    level.exits[0] = {Vector3(-34.0f, 1.0f, 0.0f), Vector3(3.0f, 2.0f, 3.0f)};
+    level.exits[1] = {Vector3(34.0f, 1.0f, 0.0f), Vector3(3.0f, 2.0f, 3.0f)};
+    level.has_core = true;
+    level.core_home = Vector3(0.0f, 0.0f, 0.0f);
+    return level;
+}
+
+Level BuildLevel(const String& name) {
+    if (name == "testroom") return BuildTestRoom();
+    if (name != "arena") DRX_LOG_WARNING("Unknown map '{}', using the arena", name);
+    return BuildArena();
 }
 
 } // namespace Shift

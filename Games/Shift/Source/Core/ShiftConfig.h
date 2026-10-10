@@ -68,6 +68,10 @@ struct RoundSettings {
     float32 round_time = 480.0f;
     float32 freeze_time = 10.0f;        // nothing moves at round start
     float32 core_return_time = 20.0f;
+    float32 core_pickup_range = 1.6f;    // metres from the core (horizontal)
+    float32 round_end_delay = 6.0f;      // result screen before the next round
+    float32 match_end_delay = 12.0f;     // result screen before a new match
+    String map = "arena";               // "arena" (six rooms) or "testroom"
 };
 
 struct WallShiftSettings {
@@ -93,12 +97,13 @@ struct DroneSettings {
 struct NetSettings {
     int32 tick_rate = 30;
     int32 port = 27015;
-    float32 lag_compensation_max_ms = 200.0f;
+    float32 lag_compensation_max_ms = 400.0f;   // ping + interpolation delay must fit
     float32 interpolation_delay_ms = 100.0f;
     float32 wall_correction_interval = 1.0f;
     float32 simulated_latency_ms = 0.0f;
     float32 simulated_jitter_ms = 0.0f;
     float32 simulated_loss = 0.0f;
+    String server_address = "127.0.0.1";   // used by "Beitreten"
 };
 
 struct ShiftConfig {

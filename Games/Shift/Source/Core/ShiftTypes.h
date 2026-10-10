@@ -37,6 +37,7 @@ struct PlayerInput {
     float32 yaw = 0.0f;
     float32 pitch = 0.0f;
     uint16 buttons = 0;
+    float32 view_tick = 0.0f;   // server tick the client was showing when it fired (0 = now)
 
     bool Has(InputButton button) const { return (buttons & button) != 0; }
 };

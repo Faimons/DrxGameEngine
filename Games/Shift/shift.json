@@ -48,7 +48,11 @@
         "rounds_to_win": 2,
         "round_time": 480,
         "freeze_time": 10,
-        "core_return_time": 20
+        "core_return_time": 20,
+        "core_pickup_range": 1.6,
+        "round_end_delay": 6,
+        "match_end_delay": 12,
+        "map": "arena"
     },
 
     "shifts": {
@@ -74,11 +78,12 @@
     "net": {
         "tick_rate": 30,
         "port": 27015,
-        "lag_compensation_max_ms": 200,
+        "lag_compensation_max_ms": 400,
         "interpolation_delay_ms": 100,
         "wall_correction_interval": 1.0,
         "simulated_latency_ms": 0,
         "simulated_jitter_ms": 0,
-        "simulated_loss": 0
+        "simulated_loss": 0,
+        "server_address": "127.0.0.1"
     }
 }
