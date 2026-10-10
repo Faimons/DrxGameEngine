@@ -27,13 +27,14 @@ function(drx_set_warnings target)
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(${target} PRIVATE -Wall -Wextra -Wpedantic)
     elseif(MSVC)
-        target_compile_options(${target} PRIVATE /W4 /permissive-)
+        target_compile_options(${target} PRIVATE /W4 /permissive- /utf-8)
     endif()
     target_compile_definitions(${target} PRIVATE $<$<CONFIG:Debug>:DRX_DEBUG=1>)
 endfunction()
 
+# /utf-8 stays per target: assimp adds /source-charset:utf-8, which MSVC rejects together with it
 if(MSVC)
-    add_compile_options(/MP /utf-8)
+    add_compile_options(/MP)
 endif()
 
 set(THREADS_PREFER_PTHREAD_FLAG ON)
