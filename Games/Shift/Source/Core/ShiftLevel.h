@@ -62,7 +62,13 @@ Level BuildTestRoom();
  */
 Level BuildArena();
 
-// "arena" or "testroom"
+/**
+ * Factory (large map): 5 x 3 halls of 14 x 14 m with cover, raised platforms, two rotating halls
+ * next to the core hall and moving doors for every pattern, so each shift changes the routes.
+ */
+Level BuildFactory();
+
+// "arena", "fabrik" or "testroom"
 Level BuildLevel(const String& name);
 
 } // namespace Shift

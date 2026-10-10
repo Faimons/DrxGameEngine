@@ -562,7 +562,8 @@ TEST(ShiftPlanTest, EachPatternMovesItsWalls) {
 
 TEST(ShiftArenaTest, WallsNeverExceedMaxSpeed) {
     const ShiftConfig c = LoadConfig();
-    const Level arena = BuildArena();
+    for (const char* map : {"arena", "fabrik"}) {
+    const Level arena = BuildLevel(map);
     const ShiftPlan plan(ShiftMode::Patterns, 99, kArenaGroups, c.shifts.all_open_max_per);
     const float32 dt = c.GetTickInterval();
     for (const MovingSegmentDef& def : arena.segments) {
@@ -582,15 +583,21 @@ TEST(ShiftArenaTest, WallsNeverExceedMaxSpeed) {
             }
             previous = corners;
         }
-        EXPECT_LE(max_speed, c.shifts.max_speed + 0.01f) << def.name;
+        EXPECT_LE(max_speed, c.shifts.max_speed + 0.01f) << map << ": " << def.name;
+    }
     }
 }
 
-TEST(ShiftArenaTest, TenMinutesShowAllPatternsAndNothingHangs) {
+class ShiftMapTest : public ::testing::TestWithParam<const char*> {};
+
+TEST_P(ShiftMapTest, TenMinutesShowAllPatternsAndNothingHangs) {
     ShiftConfig config = LoadConfig();
     ShiftWorld world;
     ASSERT_TRUE(world.Initialize(config));
-    BuildArena().Apply(world);
+    const Level level = BuildLevel(GetParam());
+    level.Apply(world);
+    // Map bounds from the floor
+    const Vector3 floor_half = level.boxes[0].size * 0.5f;
     const PlayerId a = world.AddPlayer(Team::A);
     const PlayerId b = world.AddPlayer(Team::B);
     world.StartMatch(4242);
@@ -620,14 +627,16 @@ TEST(ShiftArenaTest, TenMinutesShowAllPatternsAndNothingHangs) {
             if (!p->alive) continue;
             const Vector3 f = p->GetFeet();
             ASSERT_GT(f.y, -0.1f) << "fell through the floor at tick " << i;
-            ASSERT_LT(std::abs(f.x), 37.0f) << "left the map at tick " << i;
-            ASSERT_LT(std::abs(f.z), 13.5f) << "left the map at tick " << i;
+            ASSERT_LT(std::abs(f.x), floor_half.x) << "left the map at tick " << i;
+            ASSERT_LT(std::abs(f.z), floor_half.z) << "left the map at tick " << i;
         }
     }
     for (int p = 1; p <= 5; ++p) EXPECT_TRUE(seen[p]) << "pattern " << p << " not shown in 10 minutes";
     EXPECT_GE(world.GetMatch().round, 1);
-    std::printf("[ arena  ] 10 min: %d crushes, round %d\n", crushes, world.GetMatch().round);
+    std::printf("[ %-7s] 10 min: %d crushes, round %d\n", GetParam(), crushes, world.GetMatch().round);
 }
+
+INSTANTIATE_TEST_SUITE_P(Maps, ShiftMapTest, ::testing::Values("arena", "fabrik"));
 
 // ============================================================================
 // Phase 5: round logic with the core

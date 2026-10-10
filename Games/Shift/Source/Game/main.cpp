@@ -333,7 +333,14 @@ private:
         if (input.IsKeyPressed(Input::KeyCode::Num1)) ok = StartOffline();
         else if (input.IsKeyPressed(Input::KeyCode::Num2)) ok = StartHost();
         else if (input.IsKeyPressed(Input::KeyCode::Num3)) ok = StartClient("");
-        else if (input.IsKeyPressed(Input::KeyCode::Escape)) RequestQuit();
+        else if (input.IsKeyPressed(Input::KeyCode::M)) {
+            static const char* const kMaps[] = {"arena", "fabrik", "testroom"};
+            size_t next = 0;
+            for (size_t i = 0; i < 3; ++i) {
+                if (config_.round.map == kMaps[i]) next = (i + 1) % 3;
+            }
+            config_.round.map = kMaps[next];
+        } else if (input.IsKeyPressed(Input::KeyCode::Escape)) RequestQuit();
         if (!ok) {
             DRX_LOG_ERROR("SHIFT: could not start the game");
             RequestQuit();
@@ -595,6 +602,7 @@ private:
         line("1   Offline spielen (Arena mit Puppe)", {1, 1, 1, 1}, 32.0f);
         line(fmt::format("2   Duell hosten (Port {})", config_.net.port), {1, 1, 1, 1}, 32.0f);
         line(fmt::format("3   Beitreten ({})", config_.net.server_address), {1, 1, 1, 1}, 32.0f);
+        line(fmt::format("M   Karte: {}", config_.round.map), {1.0f, 0.85f, 0.4f, 1.0f}, 32.0f);
         line("Esc  Beenden", {1, 1, 1, 0.7f}, 32.0f);
         y += 20.0f;
         line("Die Adresse zum Beitreten steht in shift.json unter \"net\" -> \"server_address\".", {0.8f, 0.85f, 1.0f, 0.8f}, 22.0f);

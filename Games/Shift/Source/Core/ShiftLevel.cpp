@@ -33,6 +33,34 @@ MovingSegmentDef SinkingDoor(const String& name, SegmentGroup group, float32 x0,
     return SlidingSegment(name, group, center, size, {0.0f, -(kHeight + 0.1f), 0.0f});
 }
 
+// Rotating square (half 4.9, walls 0.4, 3 m openings west and south); pattern 2 turns it -90 degrees,
+// so the openings face north and west. The corners sweep a circle of 6.93 m radius.
+void AddRotatingRoom(Level& level, const Math::Vector3& center, const String& name) {
+    using Math::Vector3;
+    constexpr float32 kInner = 4.9f;
+    constexpr float32 kThick = 0.4f;
+    constexpr float32 kDoorHalf = 1.5f;
+    const float32 face = kInner - kThick * 0.5f;   // wall centre line
+    const float32 piece = (2.0f * kInner - 2.0f * kDoorHalf) * 0.5f;
+    const Vector3 pivot(center.x, kHeight * 0.5f, center.z);
+    auto add = [&](const char* part, const Vector3& offset, const Vector3& size) {
+        MovingSegmentDef def;
+        def.name = name + " " + part;
+        def.group = SegmentGroup::MachineRoom;
+        def.center = pivot + offset;
+        def.size = size;
+        def.rotate = -90.0f;
+        def.pivot = pivot;
+        level.segments.push_back(def);
+    };
+    add("N", {0.0f, 0.0f, -face}, {2.0f * kInner, kHeight, kThick});
+    add("O", {face, 0.0f, 0.0f}, {kThick, kHeight, 2.0f * kInner - 2.0f * kThick});
+    add("W1", {-face, 0.0f, -kDoorHalf - piece * 0.5f}, {kThick, kHeight, piece - kThick});
+    add("W2", {-face, 0.0f, kDoorHalf + piece * 0.5f}, {kThick, kHeight, piece - kThick});
+    add("S1", {-kDoorHalf - piece * 0.5f, 0.0f, face}, {piece, kHeight, kThick});
+    add("S2", {kDoorHalf + piece * 0.5f, 0.0f, face}, {piece, kHeight, kThick});
+}
+
 } // namespace
 
 void Level::AddBox(const Math::Vector3& center, const Math::Vector3& size, Surface surface) {
@@ -252,30 +280,7 @@ Level BuildArena() {
     level.AddBlock(kCore + kWall, mx0, kDoor, kMachineHalf, Surface::Wall);
     level.AddBlock(mx1, mx1 + 2.0f, -kMachineHalf, kMachineHalf, Surface::Wall);   // east shell
 
-    // Rotating square (half 4.9, walls 0.4): openings west and south, after -90 degrees north and west
-    {
-        constexpr float32 kInner = 4.9f;
-        constexpr float32 kThick = 0.4f;
-        const float32 face = kInner - kThick * 0.5f;           // wall centre line
-        const float32 piece = (2.0f * kInner - 2.0f * kDoor) * 0.5f;
-        const Vector3 pivot(kMachineX, kHeight * 0.5f, 0.0f);
-        auto add = [&](const char* name, const Vector3& offset, const Vector3& size) {
-            MovingSegmentDef def;
-            def.name = name;
-            def.group = SegmentGroup::MachineRoom;
-            def.center = pivot + offset;
-            def.size = size;
-            def.rotate = -90.0f;
-            def.pivot = pivot;
-            level.segments.push_back(def);
-        };
-        add("Maschine N", {0.0f, 0.0f, -face}, {2.0f * kInner, kHeight, kThick});
-        add("Maschine O", {face, 0.0f, 0.0f}, {kThick, kHeight, 2.0f * kInner - 2.0f * kThick});
-        add("Maschine W1", {-face, 0.0f, -kDoor - piece * 0.5f}, {kThick, kHeight, piece - kThick});
-        add("Maschine W2", {-face, 0.0f, kDoor + piece * 0.5f}, {kThick, kHeight, piece - kThick});
-        add("Maschine S1", {-kDoor - piece * 0.5f, 0.0f, face}, {piece, kHeight, kThick});
-        add("Maschine S2", {kDoor + piece * 0.5f, 0.0f, face}, {piece, kHeight, kThick});
-    }
+    AddRotatingRoom(level, Vector3(kMachineX, 0.0f, 0.0f), "Maschine");
 
     // --- North wing side panels (pattern 4): move 1 m in from each side; state 1 = retracted ---
     {
@@ -304,8 +309,141 @@ Level BuildArena() {
     return level;
 }
 
+Level BuildFactory() {
+    using Math::Vector3;
+    Level level;
+    level.name = "Fabrik";
+    level.shift_mode = ShiftMode::Patterns;
+
+    // 5 x 3 halls of 14 x 14 m; hall (column c, row r) spans x = -35 + 14c .. , z = -21 + 14r ..
+    constexpr int kCols = 5;
+    constexpr int kRows = 3;
+    constexpr float32 kCell = 14.0f;
+    constexpr float32 kX0 = -35.0f;
+    constexpr float32 kZ0 = -21.0f;
+    constexpr float32 kDoorHalf = 1.5f;
+    const float32 half_wall = kWall * 0.5f;
+    auto line_x = [&](int i) { return kX0 + kCell * static_cast<float32>(i); };
+    auto line_z = [&](int j) { return kZ0 + kCell * static_cast<float32>(j); };
+
+    level.AddBlock(line_x(0) - 1.0f, line_x(kCols) + 1.0f, line_z(0) - 1.0f, line_z(kRows) + 1.0f, Surface::Floor, -0.5f, 0.0f);
+    level.AddBlock(line_x(0) - 1.0f, line_x(kCols) + 1.0f, line_z(0) - 1.0f, line_z(kRows) + 1.0f, Surface::Ceiling,
+                   kHeight, kHeight + 0.5f);
+
+    // Links between neighbouring halls: open doorway, or a door that moves with a shift pattern.
+    // Start halls (0,1) and (4,1) always reach the core hall (2,1): along the middle row when the
+    // core side doors are open, otherwise through the open wing row and the core's north/south doors.
+    enum class Link { Open, Door };
+    struct LinkInfo {
+        Link link = Link::Open;
+        SegmentGroup group = SegmentGroup::Toggle;
+    };
+    auto east_link = [](int c, int r) -> LinkInfo {   // between hall (c, r) and (c + 1, r)
+        if (r == 1) return (c == 1 || c == 2) ? LinkInfo{Link::Door, SegmentGroup::CoreDoorE} : LinkInfo{};
+        if (c == 1 || c == 2) return {Link::Door, r == 0 ? SegmentGroup::NorthGates : SegmentGroup::SouthGates};
+        return {};
+    };
+    auto south_link = [](int c, int /*r*/) -> LinkInfo {   // between hall (c, r) and (c, r + 1)
+        if (c == 2) return {Link::Door, SegmentGroup::CoreDoorsNS};
+        if (c == 1 || c == 3) return {Link::Door, SegmentGroup::NorthPanels};
+        return {};
+    };
+    auto door_name = [](SegmentGroup group, int c, int r) {
+        return fmt::format("Tor {}-{}-{}", static_cast<int>(group), c, r);
+    };
+
+    // Walls along x = const (west/east sides of halls)
+    for (int i = 0; i <= kCols; ++i) {
+        const float32 x = line_x(i);
+        for (int r = 0; r < kRows; ++r) {
+            const float32 z0 = line_z(r) - half_wall, z1 = line_z(r + 1) + half_wall;
+            const float32 mid = (line_z(r) + line_z(r + 1)) * 0.5f;
+            if (i == 0 || i == kCols) {
+                level.AddBlock(x - half_wall, x + half_wall, z0, z1, Surface::Wall);
+                continue;
+            }
+            level.AddBlock(x - half_wall, x + half_wall, z0, mid - kDoorHalf, Surface::Wall);
+            level.AddBlock(x - half_wall, x + half_wall, mid + kDoorHalf, z1, Surface::Wall);
+            const LinkInfo info = east_link(i - 1, r);
+            if (info.link == Link::Door) {
+                level.segments.push_back(SinkingDoor(door_name(info.group, i, r), info.group, x - 0.2f, x + 0.2f,
+                                                     mid - kDoorHalf, mid + kDoorHalf));
+            }
+        }
+    }
+    // Walls along z = const (north/south sides of halls)
+    for (int j = 0; j <= kRows; ++j) {
+        const float32 z = line_z(j);
+        for (int c = 0; c < kCols; ++c) {
+            const float32 x0 = line_x(c), x1 = line_x(c + 1);
+            const float32 mid = (x0 + x1) * 0.5f;
+            if (j == 0 || j == kRows) {
+                level.AddBlock(x0, x1, z - half_wall, z + half_wall, Surface::Wall);
+                continue;
+            }
+            level.AddBlock(x0, mid - kDoorHalf, z - half_wall, z + half_wall, Surface::Wall);
+            level.AddBlock(mid + kDoorHalf, x1, z - half_wall, z + half_wall, Surface::Wall);
+            const LinkInfo info = south_link(c, j - 1);
+            if (info.link == Link::Door) {
+                level.segments.push_back(SinkingDoor(door_name(info.group, c, j), info.group, mid - kDoorHalf,
+                                                     mid + kDoorHalf, z - 0.2f, z + 0.2f));
+            }
+        }
+    }
+
+    // Hall contents: rotating rooms north and south of the core hall, cover everywhere else.
+    // Cover sits in the four quarters (2.5 .. 5.5 m from the centre) so the doorway lanes stay free.
+    for (int c = 0; c < kCols; ++c) {
+        for (int r = 0; r < kRows; ++r) {
+            const float32 cx = (line_x(c) + line_x(c + 1)) * 0.5f;
+            const float32 cz = (line_z(r) + line_z(r + 1)) * 0.5f;
+            if (c == 2 && r != 1) {
+                AddRotatingRoom(level, Vector3(cx, 0.0f, cz), r == 0 ? "Drehhalle Nord" : "Drehhalle Sued");
+                continue;
+            }
+            const bool platform_hall = (c == 1 && r == 0) || (c == 3 && r == 2);
+            for (int q = 0; q < 4; ++q) {
+                const float32 sx = (q & 1) ? 1.0f : -1.0f;
+                const float32 sz = (q & 2) ? 1.0f : -1.0f;
+                const float32 qx = cx + sx * 4.0f, qz = cz + sz * 4.0f;
+                if (platform_hall && q == 3) {
+                    // Raised platform (1 m) with three steps on its centre side
+                    level.AddBlock(qx - 1.0f, qx + 1.5f, qz - 1.5f, qz + 1.5f, Surface::Cover, 0.0f, 1.0f);
+                    for (int step = 0; step < 3; ++step) {
+                        const float32 x = qx - 1.0f - 0.4f * static_cast<float32>(step + 1);
+                        level.AddBlock(x, x + 0.4f, qz - 1.5f, qz + 1.5f, Surface::Step, 0.0f,
+                                       0.25f * static_cast<float32>(3 - step));
+                    }
+                    continue;
+                }
+                const uint32 kind = (c == 2 && r == 1) ? 2u : HashU32(static_cast<uint32>(c), static_cast<uint32>(r),
+                                                                      static_cast<uint32>(q) + 17u) % 5u;
+                switch (kind) {
+                    case 1: level.AddBlock(qx - 0.6f, qx + 0.6f, qz - 0.6f, qz + 0.6f, Surface::Cover, 0.0f, 1.2f); break;
+                    case 2: level.AddBlock(qx - 0.5f, qx + 0.5f, qz - 0.5f, qz + 0.5f, Surface::Wall); break;
+                    case 3: level.AddBlock(qx - 1.5f, qx + 1.5f, qz - 0.25f, qz + 0.25f, Surface::Cover, 0.0f, 1.1f); break;
+                    case 4: level.AddBlock(qx - 0.25f, qx + 0.25f, qz - 1.5f, qz + 1.5f, Surface::Cover, 0.0f, 1.1f); break;
+                    default: break;   // open quarter
+                }
+            }
+        }
+    }
+
+    // Start halls west and east of the middle row; exits at their outer walls; core in the middle
+    level.boxes.push_back({{-26.0f, 0.01f, 0.0f}, {1.5f, 0.02f, 1.5f}, Surface::SpawnA, false, false});
+    level.boxes.push_back({{26.0f, 0.01f, 0.0f}, {1.5f, 0.02f, 1.5f}, Surface::SpawnB, false, false});
+    level.spawns[0] = {Vector3(-26.0f, 0.0f, 0.0f), 90.0f};
+    level.spawns[1] = {Vector3(26.0f, 0.0f, 0.0f), 270.0f};
+    level.exits[0] = {Vector3(-32.5f, 1.0f, 0.0f), Vector3(3.0f, 2.0f, 3.0f)};
+    level.exits[1] = {Vector3(32.5f, 1.0f, 0.0f), Vector3(3.0f, 2.0f, 3.0f)};
+    level.has_core = true;
+    level.core_home = Vector3(0.0f, 0.0f, 0.0f);
+    return level;
+}
+
 Level BuildLevel(const String& name) {
     if (name == "testroom") return BuildTestRoom();
+    if (name == "fabrik") return BuildFactory();
     if (name != "arena") DRX_LOG_WARNING("Unknown map '{}', using the arena", name);
     return BuildArena();
 }
