@@ -88,7 +88,14 @@ bool Application::ParseArguments(int argc, char** argv) {
         } else if (arg == "--fullscreen") {
             config_.fullscreen = true;
         } else if (arg == "--no-vsync") {
-            config_.vsync = false;
+            game_config_.AddOverride("display.vsync", "false");
+        } else if (arg == "--max-fps") {
+            const char* v = next();
+            if (!v || !ParseUInt(v, number) || number > 10000) {
+                DRX_LOG_ERROR("--max-fps expects a number between 0 and 10000");
+                return false;
+            }
+            game_config_.AddOverride("display.max_fps", v);
         } else if (arg == "--validation") {
             config_.validation = true;
         } else if (arg == "--no-validation") {
@@ -133,7 +140,11 @@ int Application::Run(int argc, char** argv) {
     DRX_LOG_INFO("Entering main loop");
     last_frame_time_ = Platform::GetTimeSeconds();
     while (!quit_requested_ && !window_->ShouldClose()) {
+        const float64 frame_start = Platform::GetTimeSeconds();
         RunFrame();
+        if (config_.max_fps > 0) {
+            Platform::WaitUntil(frame_start + 1.0 / static_cast<float64>(config_.max_fps));
+        }
         if (config_.exit_after_frames > 0 && frame_count_ >= config_.exit_after_frames) {
             quit_requested_ = true;
         }
@@ -159,6 +170,10 @@ bool Application::InitializeSystems() {
         }
         game_config_.LogAll();
     }
+    config_.vsync = game_config_.GetBool("display.vsync", config_.vsync);
+    config_.max_fps = static_cast<uint32>(std::clamp(game_config_.GetInt("display.max_fps", static_cast<int32>(config_.max_fps)), 0, 10000));
+    DRX_LOG_INFO("Display: vsync {}, frame cap {}", config_.vsync ? "on" : "off",
+                 config_.max_fps > 0 ? fmt::format("{} fps", config_.max_fps) : String("off"));
 
     HAL::WindowConfig window_config;
     window_config.title = config_.title;

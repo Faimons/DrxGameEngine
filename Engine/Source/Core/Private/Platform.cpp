@@ -70,6 +70,39 @@ void Sleep(uint32 milliseconds) {
     std::this_thread::sleep_for(std::chrono::milliseconds(milliseconds));
 }
 
+void WaitUntil(float64 target_seconds) {
+    // Coarse sleep until shortly before the target, then yield; OS sleeps overshoot by up to a timer tick
+    constexpr float64 kSpinWindow = 0.002;
+#ifdef DRX_PLATFORM_WINDOWS
+    #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+        #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+    #endif
+    // The default Windows timer resolution (15.6 ms) is too coarse for Sleep; high-resolution timers exist since 10 1803
+    static thread_local HANDLE timer = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
+                                                              TIMER_ALL_ACCESS);
+#endif
+    for (;;) {
+        const float64 remaining = target_seconds - GetTimeSeconds();
+        if (remaining <= 0.0) return;
+        if (remaining > kSpinWindow) {
+#ifdef DRX_PLATFORM_WINDOWS
+            if (timer) {
+                LARGE_INTEGER due;
+                due.QuadPart = -static_cast<LONGLONG>((remaining - kSpinWindow) * 1.0e7);   // relative, 100 ns units
+                if (SetWaitableTimer(timer, &due, 0, nullptr, nullptr, FALSE)) {
+                    WaitForSingleObject(timer, INFINITE);
+                    continue;
+                }
+            }
+#else
+            std::this_thread::sleep_for(std::chrono::duration<float64>(remaining - kSpinWindow));
+            continue;
+#endif
+        }
+        std::this_thread::yield();
+    }
+}
+
 uint32 GetCPUCoreCount() {
     return std::thread::hardware_concurrency();
 }

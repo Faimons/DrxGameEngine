@@ -13,7 +13,8 @@
  *   --screenshot FILE   save a PNG of the last frame before exiting
  *   --width W --height H
  *   --fullscreen
- *   --no-vsync
+ *   --no-vsync          same as --set display.vsync=false
+ *   --max-fps N         same as --set display.max_fps=N (0 = unlimited)
  *   --validation / --no-validation
  *   --config FILE       game configuration (JSON), available through GetConfig()
  *   --set KEY=VALUE     overrides a configuration value (repeatable)
@@ -35,6 +36,7 @@ struct ApplicationConfig {
     uint32 height = 900;
     bool fullscreen = false;
     bool vsync = true;
+    uint32 max_fps = 0;                     // frame cap, 0 = unlimited (applies without vsync as well)
 #ifdef DRX_DEBUG
     bool validation = true;
 #else

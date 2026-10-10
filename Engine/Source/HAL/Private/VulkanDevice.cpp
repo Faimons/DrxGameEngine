@@ -449,20 +449,15 @@ VkSurfaceFormatKHR GraphicsDevice::ChooseSwapSurfaceFormat(const Array<VkSurface
 }
 
 VkPresentModeKHR GraphicsDevice::ChooseSwapPresentMode(const Array<VkPresentModeKHR>& modes) {
-    if (!config_.vsync) {
-        for (const auto& mode : modes) {
-            if (mode == VK_PRESENT_MODE_IMMEDIATE_KHR) {
-                return mode;
-            }
+    // FIFO is the only mode that paces rendering to the display; mailbox renders unthrottled
+    if (config_.vsync) {
+        return VK_PRESENT_MODE_FIFO_KHR;
+    }
+    for (const VkPresentModeKHR preferred : {VK_PRESENT_MODE_MAILBOX_KHR, VK_PRESENT_MODE_IMMEDIATE_KHR}) {
+        if (std::find(modes.begin(), modes.end(), preferred) != modes.end()) {
+            return preferred;
         }
     }
-
-    for (const auto& mode : modes) {
-        if (mode == VK_PRESENT_MODE_MAILBOX_KHR) {
-            return mode;
-        }
-    }
-
     return VK_PRESENT_MODE_FIFO_KHR;
 }
 

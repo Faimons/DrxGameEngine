@@ -2,6 +2,11 @@
     // SHIFT - all gameplay values (blueprint start values). Change numbers here, never in code.
     // The file reloads while the game runs; values read at startup need a restart.
 
+    "display": {
+        "vsync": true,
+        "max_fps": 0
+    },
+
     "player": {
         "max_health": 100,
         "walk_speed": 5.5,

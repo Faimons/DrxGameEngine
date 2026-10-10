@@ -142,6 +142,11 @@ DRX_API uint64 GetTimeMilliseconds();
 DRX_API void Sleep(uint32 milliseconds);
 
 /**
+ * Wait until GetTimeSeconds() reaches target_seconds (sub-millisecond accuracy, used for frame pacing)
+ */
+DRX_API void WaitUntil(float64 target_seconds);
+
+/**
  * Get number of CPU cores
  */
 DRX_API uint32 GetCPUCoreCount();
