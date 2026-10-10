@@ -15,6 +15,7 @@
     #include <winsock2.h>
     #include <ws2tcpip.h>
     #pragma comment(lib, "ws2_32.lib")
+    using socklen_t = int;
 #else
     #include <arpa/inet.h>
     #include <cerrno>

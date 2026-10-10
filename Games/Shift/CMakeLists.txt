@@ -16,6 +16,11 @@ add_executable(ShiftGame Source/Game/main.cpp)
 target_link_libraries(ShiftGame PRIVATE ShiftCore)
 target_compile_definitions(ShiftGame PRIVATE SHIFT_CONFIG_PATH="${CMAKE_CURRENT_SOURCE_DIR}/shift.json")
 drx_set_warnings(ShiftGame)
+if(WIN32)
+    # Game window without an extra console window
+    set_target_properties(ShiftGame PROPERTIES WIN32_EXECUTABLE TRUE)
+    target_link_options(ShiftGame PRIVATE $<$<CXX_COMPILER_ID:MSVC>:/ENTRY:mainCRTStartup>)
+endif()
 
 if(TARGET GTest::gtest_main)
     add_executable(ShiftTests Tests/TestShift.cpp)

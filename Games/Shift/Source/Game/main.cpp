@@ -11,12 +11,14 @@
 
 #include "Audio/Public/SoundSynth.h"
 #include "Core/Public/Log.h"
+#include "Core/Public/Platform.h"
 #include "Debug/Public/DebugSystem.h"
 #include "Renderer/Public/MeshBuilder.h"
 #include "Runtime/Public/Application.h"
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 
 using namespace DRX;
 using Math::Matrix4;
@@ -456,7 +458,12 @@ private:
 int main(int argc, char** argv) {
     DRX::Runtime::ApplicationConfig config;
     config.title = "SHIFT";
-    config.config_path = SHIFT_CONFIG_PATH;
+    // Portable builds ship shift.json next to the executable; development builds use the source copy
+    const std::filesystem::path exe_dir = std::filesystem::path(DRX::Platform::GetExecutablePath()).parent_path();
+    const std::filesystem::path portable = exe_dir / "shift.json";
+    std::error_code ec;
+    DRX::Logger::Instance().SetOutputFile((exe_dir / "shift.log").string());   // for bug reports
+    config.config_path = std::filesystem::exists(portable, ec) ? portable.string() : String(SHIFT_CONFIG_PATH);
     Shift::ShiftApp app(std::move(config));
     return app.Run(argc, argv);
 }

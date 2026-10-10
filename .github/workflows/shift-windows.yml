@@ -1,0 +1,64 @@
+name: SHIFT Windows build
+
+on:
+  push:
+    branches: [main, master, 'claude/**']
+    paths:
+      - 'Engine/**'
+      - 'Games/**'
+      - 'ThirdParty/**'
+      - 'cmake/**'
+      - 'CMakeLists.txt'
+      - '.github/workflows/shift-windows.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      VCPKG_DEFAULT_TRIPLET: x64-windows
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Vulkan SDK
+        uses: jakoch/install-vulkan-sdk-action@v1
+        with:
+          vulkan_version: 1.3.290.0
+          install_runtime: false
+          cache: true
+          stripdown: true
+
+      - name: Install OpenAL Soft
+        shell: pwsh
+        run: vcpkg install openal-soft:x64-windows
+
+      - name: Configure
+        shell: pwsh
+        run: >
+          cmake -S . -B build -G "Visual Studio 17 2022" -A x64
+          -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_INSTALLATION_ROOT/scripts/buildsystems/vcpkg.cmake"
+          -DDRX_BUILD_EDITOR=OFF -DDRX_BUILD_TESTS=OFF -DDRX_BUILD_EXAMPLES=OFF
+          -DDRX_ENABLE_VALIDATION=OFF
+
+      - name: Build ShiftGame
+        shell: pwsh
+        run: cmake --build build --config Release --target ShiftGame --parallel
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $out = "package/SHIFT"
+          New-Item -ItemType Directory -Force -Path $out | Out-Null
+          Copy-Item build/bin/Release/ShiftGame.exe $out
+          Get-ChildItem build/bin/Release -Filter *.dll | Copy-Item -Destination $out
+          Copy-Item Games/Shift/shift.json $out
+          Get-ChildItem $out
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: SHIFT-Windows
+          path: package/SHIFT
+          retention-days: 30
