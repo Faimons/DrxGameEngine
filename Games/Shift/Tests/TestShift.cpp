@@ -1031,3 +1031,49 @@ TEST(ShiftNetTest, WallsAgreeAndHitsCountAt100ms) {
     std::printf("[ duel   ] without lag compensation: %d/%d hits\n", without.server_hits, without.server_shots);
     EXPECT_LT(without.server_hits, without.server_shots * 6 / 10);
 }
+
+// ============================================================================
+// Phase 7 (part): selectable primary weapons
+// ============================================================================
+
+TEST_F(ShiftMatchTest, LoadoutSlotsAndCarrierPistol) {
+    // Choosing the sniper during the freeze equips it at once and selects it
+    PlayerInput choose;
+    choose.loadout = 2;
+    Step(choose);
+    const SimPlayer* p = world.GetPlayer(a);
+    ASSERT_NE(p->primary.def, nullptr);
+    EXPECT_EQ(p->primary.def->id, "sniper");
+    EXPECT_EQ(p->active_slot, WeaponSlot::Primary);
+
+    // 2 switches to the pistol, 1 back to the primary
+    PlayerInput slot;
+    slot.loadout = 2;
+    slot.buttons = kButtonSlotPistol;
+    Step(slot);
+    EXPECT_EQ(world.GetPlayer(a)->active_slot, WeaponSlot::Pistol);
+    slot.buttons = kButtonSlotPrimary;
+    Step(slot);
+    EXPECT_EQ(world.GetPlayer(a)->active_slot, WeaponSlot::Primary);
+
+    // Sniper: 70 damage, one body shot leaves 30 health
+    WaitForLive();
+    const Vector3 eye = world.GetPlayer(a)->GetFeet() + Vector3(0, config.player.eye_height, 0);
+    const Vector3 d = (world.GetPlayer(b)->GetFeet() + Vector3(0, 1.0f, 0) - eye).Normalized();
+    PlayerInput fire;
+    fire.loadout = 2;
+    fire.yaw = std::atan2(d.x, -d.z) * kRadToDeg;
+    fire.pitch = std::asin(d.y) * kRadToDeg;
+    fire.buttons = kButtonFire;
+    Step(fire);
+    EXPECT_FLOAT_EQ(world.GetPlayer(b)->health, config.player.max_health - config.weapons.sniper.damage);
+
+    // A new choice outside the freeze waits for the next spawn
+    PlayerInput rifle;
+    rifle.loadout = 0;
+    Step(rifle);
+    EXPECT_EQ(world.GetPlayer(a)->primary.def->id, "sniper");
+    world.Kill(a, kInvalidPlayer);
+    for (int i = 0; i < 400 && !world.GetPlayer(a)->alive; ++i) Step(rifle);
+    EXPECT_EQ(world.GetPlayer(a)->primary.def->id, "rifle");
+}

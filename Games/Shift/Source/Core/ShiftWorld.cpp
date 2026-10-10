@@ -183,6 +183,9 @@ PlayerId ShiftWorld::AddPlayer(Team team, bool is_dummy, const WeaponDef* primar
     }
 
     player->primary.Equip(primary);
+    for (uint8 i = 0; i < kLoadoutCount; ++i) {
+        if (primary && GetLoadoutWeapon(i) == primary) player->primary_index = i;
+    }
     player->pistol.Equip(&config_.weapons.pistol);
     player->active_slot = primary ? WeaponSlot::Primary : WeaponSlot::Pistol;
     ResetPlayer(*player);
@@ -528,6 +531,15 @@ void ShiftWorld::StepPlayer(SimPlayer& player) {
     const PlayerInput& input = player.input;
     player.yaw = std::fmod(input.yaw, 360.0f);
     player.pitch = std::clamp(input.pitch, -kMaxPitch, kMaxPitch);
+    if (input.loadout < kLoadoutCount) player.loadout = input.loadout;
+    // During the round start freeze a new choice is equipped at once, otherwise at the next spawn
+    if (IsFrozen() && player.loadout != kNoLoadout && player.loadout != player.primary_index) {
+        EquipLoadout(player, player.loadout);
+        player.active_slot = WeaponSlot::Primary;
+    }
+    if (input.Has(kButtonSlotPrimary) && player.primary.def) player.active_slot = WeaponSlot::Primary;
+    if (input.Has(kButtonSlotPistol)) player.active_slot = WeaponSlot::Pistol;
+
     Move(player);
     CheckCrushed(player);
     if (!player.alive) return;
@@ -612,6 +624,7 @@ void ShiftWorld::Fire(SimPlayer& player, const WeaponDef& weapon, uint32 shot_in
         }
 
         WorldEvent shot = MakeEvent(WorldEventType::Shot, player.id);
+        shot.weapon = &weapon == player.pistol.def ? kNoLoadout : player.primary_index;
         shot.from = eye;
         shot.to = eye + direction * distance;
         shot.normal = target ? -direction : ray.normal;
@@ -665,6 +678,22 @@ void ShiftWorld::ResetPlayer(SimPlayer& player) {
     player.protection_timer = 0.0f;   // round start is not protected
 }
 
+const WeaponDef* ShiftWorld::GetLoadoutWeapon(uint8 index) const {
+    switch (index) {
+        case 0: return &config_.weapons.rifle;
+        case 1: return &config_.weapons.shotgun;
+        case 2: return &config_.weapons.sniper;
+        default: return nullptr;
+    }
+}
+
+void ShiftWorld::EquipLoadout(SimPlayer& player, uint8 index) {
+    const WeaponDef* weapon = GetLoadoutWeapon(index);
+    if (!weapon) return;
+    player.primary.Equip(weapon);
+    player.primary_index = index;
+}
+
 void ShiftWorld::Respawn(SimPlayer& player) {
     const SpawnPoint& spawn = GetSpawn(player.team);
     player.alive = true;
@@ -676,8 +705,10 @@ void ShiftWorld::Respawn(SimPlayer& player) {
     player.pitch = 0.0f;
     player.input = {};
     player.input.yaw = spawn.yaw;
-    if (player.primary.def) player.primary.Equip(player.primary.def);
+    if (player.loadout != kNoLoadout) EquipLoadout(player, player.loadout);
+    else if (player.primary.def) player.primary.Equip(player.primary.def);
     player.pistol.Equip(player.pistol.def);
+    player.active_slot = player.primary.def ? WeaponSlot::Primary : WeaponSlot::Pistol;
 
     Physics::CharacterState state;
     state.position = spawn.position;

@@ -21,7 +21,7 @@ enum class MessageType : uint8 { Welcome = 1, Input = 2, Snapshot = 3, Events = 
 
 constexpr uint32 kInputRedundancy = 8;     // every input packet repeats the last inputs (loss)
 constexpr size_t kEventsPerMessage = 14;
-constexpr uint8 kOneShotButtons = kButtonJump | kButtonReload;
+constexpr uint16 kOneShotButtons = kButtonJump | kButtonReload | kButtonSlotPrimary | kButtonSlotPistol;
 
 void WriteVec3(NetWriter& w, const Math::Vector3& v) {
     w.WriteF32(v.x);
@@ -48,11 +48,12 @@ void WriteInput(NetWriter& w, const PlayerInput& in) {
     w.WriteF32(in.pitch);
     w.WriteU16(in.buttons);
     w.WriteF32(in.view_tick);
+    w.WriteU8(in.loadout);
 }
 
 bool ReadInput(NetReader& r, PlayerInput& in) {
     if (!(r.ReadU32(in.tick) && r.ReadF32(in.move_x) && r.ReadF32(in.move_y) && r.ReadF32(in.yaw) &&
-          r.ReadF32(in.pitch) && r.ReadU16(in.buttons) && r.ReadF32(in.view_tick))) {
+          r.ReadF32(in.pitch) && r.ReadU16(in.buttons) && r.ReadF32(in.view_tick) && r.ReadU8(in.loadout))) {
         return false;
     }
     // Never trust client numbers
@@ -64,6 +65,7 @@ bool ReadInput(NetReader& r, PlayerInput& in) {
     in.move_y = std::clamp(in.move_y, -1.0f, 1.0f);
     in.pitch = std::clamp(in.pitch, -89.0f, 89.0f);
     in.yaw = std::fmod(in.yaw, 360.0f);
+    if (in.loadout >= kLoadoutCount) in.loadout = kNoLoadout;
     return true;
 }
 
@@ -84,6 +86,13 @@ void WritePlayer(NetWriter& w, const SimPlayer& p) {
     w.WriteI32(p.pistol.ammo);
     w.WriteF32(p.pistol.cooldown);
     w.WriteF32(p.pistol.reload_timer);
+    w.WriteU8(static_cast<uint8>(p.active_slot));
+    w.WriteU8(p.loadout);
+    w.WriteU8(p.primary_index);
+    w.WriteI32(p.primary.ammo);
+    w.WriteF32(p.primary.cooldown);
+    w.WriteF32(p.primary.reload_timer);
+    w.WriteU8(static_cast<uint8>((p.primary.trigger_down ? 1 : 0) | (p.primary.shot_queued ? 2 : 0)));
 }
 
 bool ReadPlayer(NetReader& r, RemotePlayerState& p) {
@@ -94,6 +103,14 @@ bool ReadPlayer(NetReader& r, RemotePlayerState& p) {
           r.ReadF32(p.reload_timer))) {
         return false;
     }
+    uint8 primary_flags = 0;
+    if (!(r.ReadU8(p.slot) && p.slot <= 1 && r.ReadU8(p.loadout) && r.ReadU8(p.primary_index) &&
+          r.ReadI32(p.primary_ammo) && r.ReadF32(p.primary_cooldown) && r.ReadF32(p.primary_reload) &&
+          r.ReadU8(primary_flags))) {
+        return false;
+    }
+    p.primary_trigger_down = (primary_flags & 1) != 0;
+    p.primary_shot_queued = (primary_flags & 2) != 0;
     p.alive = (flags & 1) != 0;
     p.grounded = (flags & 2) != 0;
     p.trigger_down = (flags & 4) != 0;
@@ -112,6 +129,7 @@ void WriteEvent(NetWriter& w, const WorldEvent& e) {
     w.WriteF32(e.amount);
     w.WriteU8(static_cast<uint8>(e.team));
     w.WriteU8(static_cast<uint8>((e.headshot ? 1 : 0) | (e.hit ? 2 : 0) | (e.crushed ? 4 : 0)));
+    w.WriteU8(e.weapon);
 }
 
 bool ReadEvent(NetReader& r, WorldEvent& e) {
@@ -119,7 +137,8 @@ bool ReadEvent(NetReader& r, WorldEvent& e) {
     uint8 flags = 0;
     if (!(r.ReadU8(type) && type <= static_cast<uint8>(WorldEventType::MatchEnd) && r.ReadU32(e.tick) &&
           r.ReadU32(e.source) && r.ReadU32(e.target) && ReadVec3(r, e.from) && ReadVec3(r, e.to) &&
-          ReadVec3(r, e.normal) && r.ReadF32(e.amount) && ReadTeam(r, e.team) && r.ReadU8(flags))) {
+          ReadVec3(r, e.normal) && r.ReadF32(e.amount) && ReadTeam(r, e.team) && r.ReadU8(flags) &&
+          r.ReadU8(e.weapon))) {
         return false;
     }
     e.type = static_cast<WorldEventType>(type);
@@ -486,7 +505,9 @@ void ShiftClient::Reconcile(const RemotePlayerState& server, uint32 server_tick)
     const PredictedFrame* frame = frames_.Find(server_tick);
     const bool ahead = server_tick <= predicted_tick_;
     if (ahead && frame && frame->alive == server.alive && frame->ammo == server.ammo &&
-        frame->reloading == (server.reload_timer > 0.0f) && (frame->state.position - server.feet).Length() < 0.03f) {
+        frame->reloading == (server.reload_timer > 0.0f) && frame->primary_ammo == server.primary_ammo &&
+        frame->slot == server.slot && me->primary_index == server.primary_index &&
+        (frame->state.position - server.feet).Length() < 0.03f) {
         return;   // prediction was right
     }
     if (ahead && predicted_tick_ > 0) ++stats_.corrections;
@@ -506,6 +527,14 @@ void ShiftClient::Reconcile(const RemotePlayerState& server, uint32 server_tick)
     me->pistol.reload_timer = server.reload_timer;
     me->pistol.trigger_down = server.trigger_down;
     me->pistol.shot_queued = server.shot_queued;
+    if (server.primary_index != me->primary_index) world_.EquipLoadout(*me, server.primary_index);
+    me->loadout = server.loadout;
+    me->primary.ammo = server.primary_ammo;
+    me->primary.cooldown = server.primary_cooldown;
+    me->primary.reload_timer = server.primary_reload;
+    me->primary.trigger_down = server.primary_trigger_down;
+    me->primary.shot_queued = server.primary_shot_queued;
+    me->active_slot = server.slot == 0 && me->primary.def ? WeaponSlot::Primary : WeaponSlot::Pistol;
 
     if (!ahead) {
         // The server is ahead of the prediction (start or a long stall): continue from its state
@@ -527,6 +556,8 @@ void ShiftClient::Reconcile(const RemotePlayerState& server, uint32 server_tick)
         f->alive = me->alive;
         f->ammo = me->pistol.ammo;
         f->reloading = me->pistol.IsReloading();
+        f->primary_ammo = me->primary.ammo;
+        f->slot = static_cast<uint8>(me->active_slot);
     }
     world_.SetEventsEnabled(true);
     world_.SetTick(predicted_tick_);
@@ -547,6 +578,8 @@ void ShiftClient::PredictStep(const PlayerInput& input) {
     frame.alive = me->alive;
     frame.ammo = me->pistol.ammo;
     frame.reloading = me->pistol.IsReloading();
+    frame.primary_ammo = me->primary.ammo;
+    frame.slot = static_cast<uint8>(me->active_slot);
     frames_.Store(tick, frame);
 
     unsent_.push_back(in);

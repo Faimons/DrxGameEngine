@@ -46,6 +46,15 @@ struct RemotePlayerState {
     float32 reload_timer = 0.0f;
     bool trigger_down = false;
     bool shot_queued = false;
+    // Primary weapon and the selected slot
+    uint8 slot = 1;
+    uint8 loadout = kNoLoadout;
+    uint8 primary_index = kNoLoadout;
+    int32 primary_ammo = 0;
+    float32 primary_cooldown = 0.0f;
+    float32 primary_reload = 0.0f;
+    bool primary_trigger_down = false;
+    bool primary_shot_queued = false;
 };
 
 struct NetStats {
@@ -140,6 +149,8 @@ private:
         bool alive = false;
         int32 ammo = 0;
         bool reloading = false;
+        int32 primary_ammo = 0;
+        uint8 slot = 1;
     };
     using RemoteHistory = Network::TickHistory<RemotePlayerState, 64>;
 

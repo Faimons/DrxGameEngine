@@ -40,6 +40,8 @@ struct SimPlayer {
     float32 respawn_timer = 0.0f;
     float32 protection_timer = 0.0f;
     float32 pickup_progress = 0.0f;   // seconds the interact key was held at the core
+    uint8 loadout = kNoLoadout;       // wished primary weapon
+    uint8 primary_index = kNoLoadout; // equipped primary weapon
 
     WeaponState primary;
     WeaponState pistol;
@@ -90,6 +92,7 @@ struct WorldEvent {
     bool headshot = false;
     bool hit = false;
     bool crushed = false;
+    uint8 weapon = kNoLoadout;   // Shot: loadout index of the weapon, kNoLoadout = pistol
 };
 
 struct SimSegment {
@@ -213,6 +216,9 @@ public:
     Array<WorldEvent> TakeEvents();
     Physics::PhysicsWorld& GetPhysics() { return physics_; }
     const ShiftConfig& GetConfig() const { return config_; }
+    // Primary weapon for a loadout index (nullptr for kNoLoadout or invalid)
+    const WeaponDef* GetLoadoutWeapon(uint8 index) const;
+    void EquipLoadout(SimPlayer& player, uint8 index);
 
 private:
     void StepPlayer(SimPlayer& player);

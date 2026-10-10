@@ -129,13 +129,17 @@ protected:
 
         if (IsMouseCaptured()) {
             const Math::Vector2 delta = input.GetMouseDelta();
-            look_yaw_ = std::fmod(look_yaw_ + delta.x * config_.player.mouse_sensitivity, 360.0f);
-            look_pitch_ = std::clamp(look_pitch_ - delta.y * config_.player.mouse_sensitivity, -89.0f, 89.0f);
+            const float32 sensitivity = config_.player.mouse_sensitivity / zoom_;
+            look_yaw_ = std::fmod(look_yaw_ + delta.x * sensitivity, 360.0f);
+            look_pitch_ = std::clamp(look_pitch_ - delta.y * sensitivity, -89.0f, 89.0f);
 
             // Latch short presses so they are not lost between ticks
             if (input.IsMouseButtonPressed(Input::MouseButton::Left) && !swallow_fire_) fire_latch_ = true;
             if (input.IsKeyPressed(Input::KeyCode::R)) reload_latch_ = true;
             if (input.IsKeyPressed(Input::KeyCode::Space)) jump_latch_ = true;
+            if (input.IsKeyPressed(Input::KeyCode::Num1)) slot_latch_ = kButtonSlotPrimary;
+            if (input.IsKeyPressed(Input::KeyCode::Num2)) slot_latch_ = kButtonSlotPistol;
+            if (input.IsKeyPressed(Input::KeyCode::B)) loadout_ = static_cast<uint8>((loadout_ + 1) % kLoadoutCount);
         }
         if (!input.IsMouseButtonDown(Input::MouseButton::Left)) swallow_fire_ = false;
 
@@ -245,10 +249,15 @@ protected:
                         weapon.ammo == 0 ? Vector4(1, 0.3f, 0.3f, 1) : Vector4(1, 1, 1, 1), 56.0f);
         }
         ui.DrawText(weapon.def->name, w - 236, h - 98, {1, 1, 1, 0.8f});
+        if (const WeaponDef* next = SimWorld().GetLoadoutWeapon(loadout_)) {
+            const bool pending = me->primary_index != loadout_;
+            ui.DrawText(fmt::format("Hauptwaffe: {}{}  (B)", next->name, pending ? " ab Respawn" : ""), w - 360, h - 124,
+                        pending ? Vector4(1.0f, 0.85f, 0.4f, 1.0f) : Vector4(1, 1, 1, 0.6f));
+        }
 
         DrawStatus(ui);
         if (!IsMouseCaptured()) CenterText(ui, "Klicken zum Spielen  -  Esc beendet", h * 0.62f, {1, 1, 1, 1}, 28.0f);
-        const String help = "WASD laufen  Leertaste springen  LMB schiessen  R nachladen  E halten: Kern  Esc Maus frei";
+        const String help = "WASD laufen  Leertaste springen  LMB schiessen  RMB zielen  R nachladen  1/2 Waffe  B Hauptwaffe  E Kern  Esc Maus frei";
         ui.DrawText(help, (w - ui.GetTextWidth(help)) * 0.5f, h - 22, {1, 1, 1, 0.6f});
     }
 
@@ -347,8 +356,12 @@ private:
             if (input.IsKeyDown(Input::KeyCode::Space) || jump_latch_) in.buttons |= kButtonJump;
             if (reload_latch_) in.buttons |= kButtonReload;
             if (input.IsKeyDown(Input::KeyCode::E)) in.buttons |= kButtonInteract;
+            if (input.IsMouseButtonDown(Input::MouseButton::Right)) in.buttons |= kButtonAim;
+            in.buttons |= slot_latch_;
         }
+        in.loadout = loadout_;
         fire_latch_ = reload_latch_ = jump_latch_ = false;
+        slot_latch_ = 0;
         return in;
     }
 
@@ -409,8 +422,11 @@ private:
                 const Vector3 from = mine ? event.from + Vector3(0, -0.15f, 0) : event.from;
                 debug.DrawLine(from, event.to, {1.0f, 0.9f, 0.55f, 1.0f}, 0.05f);
                 if (event.hit && event.target == kInvalidPlayer) debug.DrawHitPoint(event.to, event.normal, 1.0f);
-                if (mine) audio.PlayOneShot2D(shot_sound_, 0.6f);
-                else audio.PlayOneShot(shot_sound_, event.from, 0.8f);
+                // One synthesized shot, pitched per weapon: rifle, shotgun, sniper, pistol
+                static constexpr float32 kPitch[] = {1.25f, 0.7f, 0.55f, 1.0f};
+                const float32 pitch = kPitch[std::min<uint8>(event.weapon, 3)];
+                if (mine) audio.PlayOneShot2D(shot_sound_, 0.6f, pitch);
+                else audio.PlayOneShot(shot_sound_, event.from, 0.8f, pitch);
                 break;
             }
             case WorldEventType::Damage:
@@ -494,8 +510,13 @@ private:
         const SimPlayer* me = SimWorld().GetPlayer(local_id_);
         if (!me) return;
         const Vector3 eye = InterpolatedFeet(*me) + Vector3(0, config_.player.eye_height, 0);
+        // Aiming (right mouse) zooms weapons that have a scope
+        const WeaponState& weapon = SimWorld().IsCarrier(local_id_) ? me->pistol : me->ActiveWeapon();
+        const bool aiming = me->alive && IsMouseCaptured() && GetInput().IsMouseButtonDown(Input::MouseButton::Right);
+        const float32 zoom = aiming && weapon.def ? weapon.def->zoom : 1.0f;
         GetCamera() = Renderer::CameraParams::LookAt(eye, eye + LookDirection(look_yaw_, look_pitch_),
-                                                     config_.player.fov * kDegToRad, GetAspectRatio(), 0.03f, 300.0f);
+                                                     config_.player.fov / zoom * kDegToRad, GetAspectRatio(), 0.03f, 300.0f);
+        zoom_ = zoom;
     }
 
     // ------------------------------------------------------------------ world drawing
@@ -860,12 +881,15 @@ private:
     String status_error_;
     String connect_target_;
 
+    float32 zoom_ = 1.0f;
     float32 look_yaw_ = 0.0f;
     float32 look_pitch_ = 0.0f;
     bool fire_latch_ = false;
     bool reload_latch_ = false;
     bool jump_latch_ = false;
     bool swallow_fire_ = false;
+    uint16 slot_latch_ = 0;
+    uint8 loadout_ = 0;   // rifle
 
     float32 hit_marker_ = 0.0f;
     bool hit_marker_headshot_ = false;

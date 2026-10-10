@@ -16,6 +16,10 @@ constexpr PlayerId kInvalidPlayer = 0;
 
 enum class Team : uint8 { A = 0, B = 1 };
 
+// Primary weapons a player can choose (index into ShiftWorld::GetLoadoutWeapon)
+constexpr uint8 kLoadoutCount = 3;   // rifle, shotgun, sniper
+constexpr uint8 kNoLoadout = 255;
+
 inline Team Opponent(Team team) { return team == Team::A ? Team::B : Team::A; }
 
 enum InputButton : uint16 {
@@ -24,6 +28,8 @@ enum InputButton : uint16 {
     kButtonReload = 1 << 2,
     kButtonInteract = 1 << 3,
     kButtonAim = 1 << 4,
+    kButtonSlotPrimary = 1 << 5,
+    kButtonSlotPistol = 1 << 6,
 };
 
 /**
@@ -38,6 +44,7 @@ struct PlayerInput {
     float32 pitch = 0.0f;
     uint16 buttons = 0;
     float32 view_tick = 0.0f;   // server tick the client was showing when it fired (0 = now)
+    uint8 loadout = kNoLoadout;  // wished primary weapon (applied at spawn / round start)
 
     bool Has(InputButton button) const { return (buttons & button) != 0; }
 };
