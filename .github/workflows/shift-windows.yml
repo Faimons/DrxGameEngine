@@ -25,18 +25,19 @@ jobs:
       VCPKG_DEFAULT_TRIPLET: x64-windows
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Vulkan SDK
         shell: pwsh
         run: |
-          $version = "1.3.290.0"
+          $root = "C:/VulkanSDK/current"
           $installer = "$env:RUNNER_TEMP/VulkanSDK.exe"
-          Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/$version/windows/VulkanSDK-$version-Installer.exe" -OutFile $installer
-          & $installer --root "C:/VulkanSDK/$version" --accept-licenses --default-answer --confirm-command install
+          Invoke-WebRequest -Uri "https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-sdk.exe" -OutFile $installer
+          & $installer --root $root --accept-licenses --default-answer --confirm-command install
           if ($LASTEXITCODE -ne 0) { throw "Vulkan SDK installation failed" }
-          "VULKAN_SDK=C:/VulkanSDK/$version" | Out-File -FilePath $env:GITHUB_ENV -Append
-          "C:/VulkanSDK/$version/Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
+          if (-not (Test-Path "$root/Bin/glslangValidator.exe")) { throw "glslangValidator missing in $root/Bin" }
+          "VULKAN_SDK=$root" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "$root/Bin" | Out-File -FilePath $env:GITHUB_PATH -Append
 
       - name: Install OpenAL Soft
         shell: pwsh
