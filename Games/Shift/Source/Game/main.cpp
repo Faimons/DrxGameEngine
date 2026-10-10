@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <map>
 
 using namespace DRX;
 using Math::Matrix4;

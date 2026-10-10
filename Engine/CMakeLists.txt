@@ -45,9 +45,19 @@ target_include_directories(DRXEngine
 )
 
 # OpenAL (3D audio). A missing audio device at runtime is handled; the library is required to build.
-find_package(OpenAL REQUIRED)
-target_include_directories(DRXEngine PRIVATE ${OPENAL_INCLUDE_DIR})
-target_link_libraries(DRXEngine PRIVATE ${OPENAL_LIBRARY})
+# The package config (openal-soft, vcpkg) provides per-configuration libraries; the find module is the fallback.
+find_package(OpenAL CONFIG QUIET)
+if(TARGET OpenAL::OpenAL)
+    # Static engine: consumers in other directories link the target transitively
+    set_target_properties(OpenAL::OpenAL PROPERTIES IMPORTED_GLOBAL TRUE)
+    target_link_libraries(DRXEngine PRIVATE OpenAL::OpenAL)
+else()
+    find_package(OpenAL MODULE REQUIRED)
+    # The module points at .../include/AL; sources include <AL/al.h>
+    get_filename_component(DRX_OPENAL_INCLUDE_PARENT "${OPENAL_INCLUDE_DIR}" DIRECTORY)
+    target_include_directories(DRXEngine PRIVATE ${OPENAL_INCLUDE_DIR} ${DRX_OPENAL_INCLUDE_PARENT})
+    target_link_libraries(DRXEngine PRIVATE ${OPENAL_LIBRARY})
+endif()
 
 target_link_libraries(DRXEngine
     PUBLIC

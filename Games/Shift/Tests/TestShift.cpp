@@ -10,6 +10,7 @@
 #include "ShiftWeapons.h"
 #include "ShiftWorld.h"
 
+#include <algorithm>
 #include <cmath>
 
 using namespace Shift;
