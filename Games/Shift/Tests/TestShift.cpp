@@ -12,6 +12,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 
 using namespace Shift;
 using DRX::Math::Vector3;
