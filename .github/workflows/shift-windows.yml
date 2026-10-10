@@ -69,4 +69,5 @@ jobs:
         with:
           name: SHIFT-Windows
           path: package/SHIFT
+          if-no-files-found: error
           retention-days: 30
