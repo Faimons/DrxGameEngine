@@ -42,6 +42,11 @@ target_include_directories(bullet SYSTEM PUBLIC ${BULLET_SRC})
 set_target_properties(bullet PROPERTIES POSITION_INDEPENDENT_CODE ON)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(bullet PRIVATE -w)
+elseif(MSVC)
+    # Bullet's MSVC SSE path does not compile with current MSVC versions; the scalar path is
+    # portable and deterministic. PUBLIC so every user of the headers sees the same layout.
+    target_compile_definitions(bullet PUBLIC __BT_DISABLE_SSE__)
+    target_compile_options(bullet PRIVATE /w)
 endif()
 
 # ----------------------------------------------------------------------------
