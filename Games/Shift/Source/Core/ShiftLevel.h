@@ -77,7 +77,14 @@ Level BuildArena();
  */
 Level BuildFactory();
 
-// Built-in maps: "arena", "fabrik" or "testroom"
+/**
+ * Helix (research lab, 60 x 60 m): starts in the north corners with the north lab between them,
+ * labs west and east, the core chamber with four doors in the middle, a rotating room in the south
+ * and the exits in the south corners. Mirrored, so both teams have equal routes.
+ */
+Level BuildHelix();
+
+// Built-in maps: "arena", "fabrik", "helix" or "testroom"
 bool BuildBuiltinLevel(const String& name, Level& level);
 const Array<String>& BuiltinLevelNames();
 

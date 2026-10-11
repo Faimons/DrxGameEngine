@@ -637,7 +637,7 @@ TEST_P(ShiftMapTest, TenMinutesShowAllPatternsAndNothingHangs) {
     std::printf("[ %-7s] 10 min: %d crushes, round %d\n", GetParam(), crushes, world.GetMatch().round);
 }
 
-INSTANTIATE_TEST_SUITE_P(Maps, ShiftMapTest, ::testing::Values("arena", "fabrik"));
+INSTANTIATE_TEST_SUITE_P(Maps, ShiftMapTest, ::testing::Values("arena", "fabrik", "helix"));
 
 // ============================================================================
 // Phase 5: round logic with the core
@@ -1175,7 +1175,7 @@ TEST_P(ShiftBotTest, BotDeliversTheCore) {
     EXPECT_GE(won_at, 0) << "bot did not deliver the core in 4 minutes";
 }
 
-INSTANTIATE_TEST_SUITE_P(Maps, ShiftBotTest, ::testing::Values("arena", "fabrik"));
+INSTANTIATE_TEST_SUITE_P(Maps, ShiftBotTest, ::testing::Values("arena", "fabrik", "helix"));
 
 // The bot sees and shoots an enemy standing in the open
 TEST(ShiftBotFight, BotKillsAVisibleEnemy) {
@@ -1253,7 +1253,7 @@ TEST_P(ShiftMapRoutesTest, EveryWallStateHasRoutes) {
     for (const String& p : problems) ADD_FAILURE() << GetParam() << ": " << p;
 }
 
-INSTANTIATE_TEST_SUITE_P(Maps, ShiftMapRoutesTest, ::testing::Values("arena", "fabrik"));
+INSTANTIATE_TEST_SUITE_P(Maps, ShiftMapRoutesTest, ::testing::Values("arena", "fabrik", "helix"));
 
 TEST(ShiftMapFile, BrokenMapsAreReported) {
     Level level;

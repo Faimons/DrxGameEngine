@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <filesystem>
+#include <initializer_list>
 #include <system_error>
 #include <utility>
 
@@ -450,8 +451,124 @@ Level BuildFactory() {
     return level;
 }
 
+namespace {
+
+// Wall along X (constant z) or along Z (constant x) from `from` to `to`, leaving the given gaps open
+void WallWithGaps(Level& level, bool along_x, float32 fixed, float32 from, float32 to,
+                  std::initializer_list<std::pair<float32, float32>> gaps) {
+    float32 start = from;
+    const auto piece = [&](float32 a, float32 b) {
+        if (b - a < 0.05f) return;
+        if (along_x) level.AddBlock(a, b, fixed - kWall * 0.5f, fixed + kWall * 0.5f, Surface::Wall);
+        else level.AddBlock(fixed - kWall * 0.5f, fixed + kWall * 0.5f, a, b, Surface::Wall);
+    };
+    for (const auto& gap : gaps) {
+        piece(start, gap.first);
+        start = gap.second;
+    }
+    piece(start, to);
+}
+
+} // namespace
+
+Level BuildHelix() {
+    using Math::Vector3;
+    constexpr float32 kHalf = 30.0f;
+    Level level;
+    level.name = "Helix";
+    level.shift_mode = ShiftMode::Patterns;
+
+    // Shell: floor, ceiling, outer walls
+    level.AddBlock(-kHalf - kWall, kHalf + kWall, -kHalf - kWall, kHalf + kWall, Surface::Floor, -0.5f, 0.0f);
+    level.AddBlock(-kHalf - kWall, kHalf + kWall, -kHalf - kWall, kHalf + kWall, Surface::Ceiling, kHeight, kHeight + 0.5f);
+    WallWithGaps(level, true, -kHalf - kWall * 0.5f, -kHalf - kWall, kHalf + kWall, {});
+    WallWithGaps(level, true, kHalf + kWall * 0.5f, -kHalf - kWall, kHalf + kWall, {});
+    WallWithGaps(level, false, -kHalf - kWall * 0.5f, -kHalf, kHalf, {});
+    WallWithGaps(level, false, kHalf + kWall * 0.5f, -kHalf, kHalf, {});
+
+    for (const float32 side : {-1.0f, 1.0f}) {
+        const auto x = [side](float32 v) { return v * side; };
+        const auto span = [side](float32 a, float32 b) { return side < 0.0f ? std::make_pair(-b, -a) : std::make_pair(a, b); };
+        const char* west = side < 0.0f ? "West" : "Ost";
+
+        // Start room (north corner, 12 x 10 m): open to the south, north gate into the north lab
+        const auto start_south = span(22.0f, 26.0f);
+        WallWithGaps(level, true, -20.0f, side < 0.0f ? -kHalf : 18.0f, side < 0.0f ? -18.0f : kHalf, {start_south});
+        WallWithGaps(level, false, x(18.0f), -kHalf, -20.0f, {{-27.5f, -24.5f}});
+        level.segments.push_back(SinkingDoor(fmt::format("Nordtor {}", west), SegmentGroup::NorthGates,
+                                             x(18.0f) - kWall * 0.5f, x(18.0f) + kWall * 0.5f, -27.5f, -24.5f));
+        level.AddBlock(span(20.0f, 21.5f).first, span(20.0f, 21.5f).second, -23.0f, -22.0f, Surface::Cover, 0.0f, 1.0f);
+
+        // North lab half: south wall with a door to the hall
+        const auto lab_door = span(9.0f, 12.0f);
+        WallWithGaps(level, true, -20.0f, side < 0.0f ? -18.0f : 0.0f, side < 0.0f ? 0.0f : 18.0f, {lab_door});
+        // Lab benches and a cryo tank
+        level.AddBlock(span(3.0f, 7.0f).first, span(3.0f, 7.0f).second, -27.0f, -26.0f, Surface::Cover, 0.0f, 1.0f);
+        level.AddBlock(span(12.0f, 15.0f).first, span(12.0f, 15.0f).second, -26.5f, -25.5f, Surface::Cover, 0.0f, 1.0f);
+        level.AddBlock(span(7.5f, 9.5f).first, span(7.5f, 9.5f).second, -24.0f, -22.0f, Surface::Cover, 0.0f, 2.2f);
+
+        // Side lab (12 x 20 m): doors north and south, lab gate to the hall (closes in "Engpass")
+        const auto lab_ns = span(22.0f, 26.0f);
+        WallWithGaps(level, true, -12.0f, side < 0.0f ? -kHalf : 18.0f, side < 0.0f ? -18.0f : kHalf, {lab_ns});
+        WallWithGaps(level, true, 8.0f, side < 0.0f ? -kHalf : 18.0f, side < 0.0f ? -18.0f : kHalf, {lab_ns});
+        WallWithGaps(level, false, x(18.0f), -12.0f, 8.0f, {{-4.4f, -1.6f}});
+        // Lab gate: closed in state 0, slides north into the wall in state 1 (open at round start)
+        level.segments.push_back(SlidingSegment(fmt::format("Labortor {}", west), SegmentGroup::NorthPanels,
+                                                Vector3(x(18.0f), kHeight * 0.5f, -3.0f), Vector3(kWall, kHeight, 2.8f),
+                                                Vector3(0.0f, 0.0f, -2.9f)));
+        for (const float32 tz : {-7.0f, 3.0f}) {
+            level.AddBlock(span(21.0f, 23.0f).first, span(21.0f, 23.0f).second, tz - 1.0f, tz + 1.0f, Surface::Cover, 0.0f, 2.2f);
+            level.AddBlock(span(25.0f, 27.0f).first, span(25.0f, 27.0f).second, tz - 1.0f, tz + 1.0f, Surface::Cover, 0.0f, 2.2f);
+        }
+
+        // Hall pillars and cover between labs and core
+        level.AddBlock(span(12.0f, 13.5f).first, span(12.0f, 13.5f).second, -16.5f, -15.0f, Surface::Wall);
+        level.AddBlock(span(4.0f, 5.5f).first, span(4.0f, 5.5f).second, -16.5f, -15.0f, Surface::Cover, 0.0f, 1.0f);
+        level.AddBlock(span(12.0f, 13.0f).first, span(12.0f, 13.0f).second, -6.0f, -3.0f, Surface::Cover, 0.0f, 1.0f);
+        level.AddBlock(span(12.0f, 13.0f).first, span(12.0f, 13.0f).second, 1.0f, 4.0f, Surface::Cover, 0.0f, 1.8f);
+
+        // Core chamber west / east wall with the side door
+        WallWithGaps(level, false, x(8.0f), -8.0f, 8.0f, {{-1.5f, 1.5f}});
+        level.segments.push_back(SinkingDoor(fmt::format("Kerntuer {}", west), SegmentGroup::CoreDoorE,
+                                             x(8.0f) - kWall * 0.5f, x(8.0f) + kWall * 0.5f, -1.5f, 1.5f));
+        level.AddBlock(span(4.5f, 5.5f).first, span(4.5f, 5.5f).second, -5.5f, -4.5f, Surface::Cover, 0.0f, 1.0f);
+        level.AddBlock(span(4.5f, 5.5f).first, span(4.5f, 5.5f).second, 4.5f, 5.5f, Surface::Cover, 0.0f, 1.0f);
+
+        // Exit room (south corner) with the south gate to the yard
+        WallWithGaps(level, true, 12.0f, side < 0.0f ? -kHalf : 18.0f, side < 0.0f ? -18.0f : kHalf, {span(22.0f, 26.0f)});
+        WallWithGaps(level, false, x(18.0f), 12.0f, kHalf, {{19.0f, 22.0f}});
+        level.segments.push_back(SinkingDoor(fmt::format("Suedtor {}", west), SegmentGroup::SouthGates,
+                                             x(18.0f) - kWall * 0.5f, x(18.0f) + kWall * 0.5f, 19.0f, 22.0f));
+        level.AddBlock(span(20.0f, 21.0f).first, span(20.0f, 21.0f).second, 16.0f, 18.0f, Surface::Cover, 0.0f, 1.0f);
+
+        // South yard cover (outside the rotating room's sweep)
+        level.AddBlock(span(11.0f, 13.0f).first, span(11.0f, 13.0f).second, 16.0f, 17.0f, Surface::Cover, 0.0f, 1.0f);
+        level.AddBlock(span(10.0f, 11.0f).first, span(10.0f, 11.0f).second, 23.0f, 25.0f, Surface::Cover, 0.0f, 1.8f);
+    }
+
+    // Core chamber north and south walls with the main doors (open at round start)
+    for (const float32 z : {-8.0f, 8.0f}) {
+        WallWithGaps(level, true, z, -8.0f - kWall * 0.5f, 8.0f + kWall * 0.5f, {{-1.5f, 1.5f}});
+        level.segments.push_back(SinkingDoor(z < 0.0f ? "Kerntuer Nord" : "Kerntuer Sued", SegmentGroup::CoreDoorsNS, -1.5f, 1.5f,
+                                             z - kWall * 0.5f, z + kWall * 0.5f));
+    }
+    // North lab centre: cryo tank
+    level.AddBlock(-1.0f, 1.0f, -27.0f, -25.0f, Surface::Cover, 0.0f, 2.5f);
+    // Rotating room in the south (pattern "Drehraum")
+    AddRotatingRoom(level, Vector3(0.0f, 0.0f, 20.5f), "Drehraum");
+
+    level.spawns[0] = {Vector3(-24.0f, 0.0f, -25.0f), 180.0f};   // looks south
+    level.spawns[1] = {Vector3(24.0f, 0.0f, -25.0f), 180.0f};
+    level.exits[0] = {Vector3(-24.0f, 1.0f, 24.0f), Vector3(3.0f, 2.0f, 3.0f)};
+    level.exits[1] = {Vector3(24.0f, 1.0f, 24.0f), Vector3(3.0f, 2.0f, 3.0f)};
+    level.has_core = true;
+    level.core_home = Vector3(0.0f, 0.0f, 0.0f);
+    return level;
+}
+
 bool BuildBuiltinLevel(const String& name, Level& level) {
-    if (name == "testroom") level = BuildTestRoom();
+    if (name == "helix") level = BuildHelix();
+    else if (name == "testroom") level = BuildTestRoom();
     else if (name == "fabrik") level = BuildFactory();
     else if (name == "arena") level = BuildArena();
     else return false;
@@ -459,7 +576,7 @@ bool BuildBuiltinLevel(const String& name, Level& level) {
 }
 
 const Array<String>& BuiltinLevelNames() {
-    static const Array<String> names = {"arena", "fabrik", "testroom"};
+    static const Array<String> names = {"arena", "fabrik", "helix", "testroom"};
     return names;
 }
 
