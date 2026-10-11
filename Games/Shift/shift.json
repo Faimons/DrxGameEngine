@@ -28,7 +28,7 @@
     "weapons": {
         "rifle":   { "damage": 14, "headshot_multiplier": 1.5, "pellets": 1, "fire_rate": 10,  "automatic": true,
                      "magazine": 30, "reload_time": 2.0, "range": 150, "spread": 0.6,
-                     "model": "Models/ak47.glb", "model_scale": 0.18,
+                     "model": "Models/Weapons/ak47.glb", "model_scale": 0.18,
                      "view_right": 0.2, "view_down": 0.2, "view_forward": 0.5 },
         "shotgun": { "damage": 9,  "headshot_multiplier": 1.5, "pellets": 8, "fire_rate": 1.2, "automatic": false,
                      "magazine": 6,  "reload_time": 2.5, "range": 60, "spread": 4.0,
