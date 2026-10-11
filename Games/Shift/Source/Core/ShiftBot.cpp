@@ -6,8 +6,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <queue>
+#include <utility>
 
 namespace Shift {
 
