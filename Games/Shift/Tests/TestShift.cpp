@@ -1086,3 +1086,49 @@ TEST_F(ShiftMatchTest, LoadoutSlotsAndCarrierPistol) {
     for (int i = 0; i < 400 && !world.GetPlayer(a)->alive; ++i) Step(rifle);
     EXPECT_EQ(world.GetPlayer(a)->primary.def->id, "rifle");
 }
+
+// ============================================================================
+// Assets: character rig and Mixamo clips
+// ============================================================================
+
+#include "Renderer/Public/ModelLoader.h"
+#include "Renderer/Public/SkinnedModel.h"
+
+TEST(ShiftAssetsTest, CharacterClipsMatchTheRig) {
+    using namespace DRX::Renderer;
+    const String dir = SHIFT_ASSET_DIR;
+    SkinnedModelData model;
+    ASSERT_TRUE(LoadSkinnedModelData(dir + "/Models/Characters/game_ready_swat_character.glb", model));
+    const int32 hips = model.FindNode("hips");
+    ASSERT_GE(hips, 0);
+    const Vector3 size = model.bounds.max - model.bounds.min;
+    std::printf("[ rig    ] %zu nodes, %zu bones, hips bind (%.2f %.2f %.2f) bounds %.2f x %.2f x %.2f\n",
+                model.nodes.size(), model.bones.size(), model.nodes[hips].position.x, model.nodes[hips].position.y,
+                model.nodes[hips].position.z, size.x, size.y, size.z);
+
+    for (const char* file : {"Basic Shooter Pack/rifle aiming idle.fbx", "Basic Shooter Pack/rifle run.fbx", "Dying.fbx"}) {
+        Array<AnimationClipData> clips;
+        ASSERT_TRUE(LoadAnimationClips(dir + "/Animations/" + file, clips)) << file;
+        ASSERT_FALSE(clips.empty());
+        int matched = 0;
+        Vector3 hips_key;
+        for (const AnimationChannel& channel : clips[0].channels) {
+            if (model.FindNode(channel.key) >= 0) ++matched;
+            if (channel.key == "hips" && !channel.positions.empty()) hips_key = channel.positions[0];
+        }
+        std::printf("[ clip   ] %-40s %.2f s, %d/%zu channels match, hips key (%.2f %.2f %.2f)\n", file,
+                    clips[0].duration, matched, clips[0].channels.size(), hips_key.x, hips_key.y, hips_key.z);
+        EXPECT_GE(matched * 10, static_cast<int>(clips[0].channels.size()) * 9) << file;
+        SkeletonPose pose;
+        BindPose(model, pose);
+        SampleClip(model, clips[0], BindClip(model, clips[0]), 0.5f, pose);
+        Array<DRX::Math::Matrix4> globals;
+        ComputeGlobals(model, pose, globals);
+        const AABB posed = ComputeSkinnedBounds(model, globals);
+        const Vector3 extent = posed.max - posed.min;
+        std::printf("[ pose   ] %-40s bounds y %.2f .. %.2f, size %.2f x %.2f x %.2f\n", file, posed.min.y, posed.max.y,
+                    extent.x, extent.y, extent.z);
+        EXPECT_NEAR(extent.y, size.y, size.y * 0.35f) << file << ": animated pose has the wrong size";
+        EXPECT_GT(clips[0].duration, 0.1f);
+    }
+}

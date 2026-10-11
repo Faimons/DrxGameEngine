@@ -21,6 +21,7 @@
 #include "Debug/Public/DebugSystem.h"
 #include "Renderer/Public/MeshBuilder.h"
 #include "Renderer/Public/ModelLoader.h"
+#include "Renderer/Public/SkinnedModel.h"
 #include "Runtime/Public/Application.h"
 
 #include <algorithm>
@@ -86,9 +87,35 @@ struct PlayerView {
     PlayerId id = kInvalidPlayer;
     Team team = Team::A;
     Vector3 feet;
+    Vector3 velocity;
+    float32 yaw = 0.0f;
+    bool grounded = true;
     bool alive = false;
     bool is_protected = false;
     float32 health = 0.0f;
+};
+
+// Animated third person character: one rig, named clips, cross-fade between them
+struct CharacterRig {
+    Renderer::SkinnedModelData model;
+    std::map<String, Renderer::AnimationClipData> clips;
+    std::map<String, Renderer::ClipBinding> bindings;
+    float32 scale = 1.0f;
+    float32 foot_offset = 0.0f;
+    float32 yaw_offset = 180.0f;
+    float32 blend_time = 0.2f;
+    bool loaded = false;
+};
+
+struct CharacterInstance {
+    Renderer::SkinnedMesh mesh;
+    String clip;
+    String previous_clip;
+    float32 time = 0.0f;
+    float32 previous_time = 0.0f;
+    float32 blend = 1.0f;
+    Renderer::SkeletonPose pose_a, pose_b, pose;
+    Array<Matrix4> globals;
 };
 
 class ShiftApp final : public Runtime::Application {
@@ -201,8 +228,20 @@ protected:
 
         DrawViewModel(renderer);
 
+        const float64 now = GetTime();
+        const float32 frame_dt = static_cast<float32>(std::clamp(now - last_render_time_, 0.0, 0.1));
+        last_render_time_ = now;
         for (const PlayerView& player : CollectPlayers()) {
-            if (player.id == local_id_ || !player.alive) continue;
+            if (player.id == local_id_) continue;
+            if (rig_.loaded) {
+                DrawCharacter(renderer, player, frame_dt);
+                if (player.alive) {
+                    Debug::DebugRenderer::Instance().DrawText(player.feet + Vector3(0, config_.player.height + 0.35f, 0),
+                                                              fmt::format("{:.0f}", player.health), {1, 1, 1, 1});
+                }
+                continue;
+            }
+            if (!player.alive) continue;
             Renderer::Material body;
             body.color = TeamColor(player.team);
             if (player.is_protected) {
@@ -391,6 +430,9 @@ private:
             v.id = id;
             v.team = player->team;
             v.feet = InterpolatedFeet(*player);
+            v.velocity = player->controller->GetVelocity();
+            v.yaw = player->yaw;
+            v.grounded = player->IsGrounded();
             v.alive = player->alive;
             v.is_protected = player->IsProtected();
             v.health = player->health;
@@ -405,6 +447,9 @@ private:
                 v.id = id;
                 v.team = state.team;
                 v.feet = state.feet;
+                v.velocity = state.velocity;
+                v.yaw = state.yaw;
+                v.grounded = state.grounded;
                 v.alive = state.alive;
                 v.is_protected = state.protection_timer > 0.0f;
                 v.health = state.health;
@@ -602,6 +647,86 @@ private:
                                   Math::Quaternion::FromAxisAngle(Vector3::Forward, tilt * kDegToRad).ToMatrix() *
                                   Matrix4::Translation(-it->second.center);
         Renderer::DrawModel(renderer, it->second.model, transform);
+    }
+
+    // ------------------------------------------------------------------ characters
+
+    void LoadCharacterRig() {
+        const Config& config = GetConfig();
+        const String model = config.GetString("character.model", "");
+        if (model.empty()) return;
+        const auto asset = [this](const String& file) { return (std::filesystem::path(launch_.asset_dir) / file).string(); };
+        if (!Renderer::LoadSkinnedModelData(asset(model), rig_.model)) return;
+
+        const float32 height = rig_.model.bounds.max.y - rig_.model.bounds.min.y;
+        rig_.scale = height > 0.0f ? config.GetFloat("character.height", config_.player.height) / height : 1.0f;
+        rig_.foot_offset = -rig_.model.bounds.min.y;
+        rig_.yaw_offset = config.GetFloat("character.yaw_offset", 180.0f);
+        rig_.blend_time = std::max(0.01f, config.GetFloat("character.blend_time", 0.2f));
+        for (const char* name : {"idle", "run", "back", "left", "right", "jump", "death"}) {
+            const String file = config.GetString(String("character.clips.") + name, "");
+            if (file.empty()) continue;
+            Array<Renderer::AnimationClipData> clips;
+            if (!Renderer::LoadAnimationClips(asset(file), clips) || clips.empty()) continue;
+            rig_.bindings[name] = Renderer::BindClip(rig_.model, clips[0]);
+            rig_.clips[name] = std::move(clips[0]);
+        }
+        rig_.loaded = rig_.clips.count("idle") > 0;
+        DRX_LOG_INFO("SHIFT: character {} with {} clips ({})", model, rig_.clips.size(), rig_.loaded ? "ok" : "no idle clip");
+    }
+
+    // Clip for what the player is doing: dead, in the air, standing, or moving in a direction
+    String ChooseClip(const PlayerView& player) const {
+        const auto has = [this](const char* name) { return rig_.clips.count(name) > 0; };
+        if (!player.alive) return has("death") ? "death" : "idle";
+        if (!player.grounded && has("jump")) return "jump";
+        const Vector3 v(player.velocity.x, 0.0f, player.velocity.z);
+        if (v.LengthSquared() < 0.36f) return "idle";
+        const float32 forward = Vector3::Dot(v, FlatForward(player.yaw));
+        const float32 right = Vector3::Dot(v, FlatRight(player.yaw));
+        const char* clip = std::abs(forward) >= std::abs(right) ? (forward >= 0.0f ? "run" : "back")
+                                                                  : (right >= 0.0f ? "right" : "left");
+        return has(clip) ? clip : "idle";
+    }
+
+    void DrawCharacter(Renderer::SceneRenderer& renderer, const PlayerView& player, float32 dt) {
+        CharacterInstance& character = characters_[player.id];
+        if (!character.mesh.IsValid() && !character.mesh.Create(renderer, rig_.model, fmt::format("player{}", player.id))) {
+            return;
+        }
+        const String clip = ChooseClip(player);
+        if (clip != character.clip) {
+            character.previous_clip = character.clip;
+            character.previous_time = character.time;
+            character.clip = clip;
+            character.time = 0.0f;
+            character.blend = character.previous_clip.empty() ? 1.0f : 0.0f;
+        }
+        character.time += dt;
+        character.previous_time += dt;
+        character.blend = std::min(1.0f, character.blend + dt / rig_.blend_time);
+
+        const auto sample = [this](const String& name, float32 time, Renderer::SkeletonPose& pose) {
+            Renderer::BindPose(rig_.model, pose);
+            Renderer::SampleOptions options;
+            options.loop = name != "death" && name != "jump";
+            Renderer::SampleClip(rig_.model, rig_.clips.at(name), rig_.bindings.at(name), time, pose, options);
+        };
+        sample(character.clip, character.time, character.pose_b);
+        if (character.blend < 1.0f && rig_.clips.count(character.previous_clip)) {
+            sample(character.previous_clip, character.previous_time, character.pose_a);
+            Renderer::BlendPoses(character.pose_a, character.pose_b, character.blend, character.pose);
+        } else {
+            character.pose = character.pose_b;
+        }
+        Renderer::ComputeGlobals(rig_.model, character.pose, character.globals);
+        character.mesh.Update(renderer, rig_.model, character.globals);
+
+        const Matrix4 transform = Matrix4::Translation(player.feet) *
+                                  Math::Quaternion::FromAxisAngle(Vector3::Up, (rig_.yaw_offset - player.yaw) * kDegToRad).ToMatrix() *
+                                  Matrix4::Scale(rig_.scale) * Matrix4::Translation(Vector3(0.0f, rig_.foot_offset, 0.0f));
+        const Vector4 tint = player.team == Team::A ? Vector4(0.8f, 0.9f, 1.15f, 1.0f) : Vector4(1.15f, 0.85f, 0.8f, 1.0f);
+        character.mesh.Draw(renderer, transform, tint);
     }
 
     Vector3 CoreRenderPosition() const {
@@ -894,6 +1019,7 @@ private:
             DRX_LOG_INFO("SHIFT: weapon model {} ({:.2f} x {:.2f} x {:.2f} m)", def->model, size.x, size.y, size.z);
             view_models_[def->id] = std::move(view);
         }
+        LoadCharacterRig();
         graphics_ready_ = true;
     }
 
@@ -903,6 +1029,8 @@ private:
         meshes_.clear();
         for (auto& [def, view] : view_models_) Renderer::ReleaseModel(renderer, view.model);
         view_models_.clear();
+        for (auto& [id, character] : characters_) character.mesh.Release(renderer);
+        characters_.clear();
         if (grid_texture_.IsValid()) renderer.DestroyTexture(grid_texture_);
         graphics_ready_ = false;
     }
@@ -963,6 +1091,9 @@ private:
     String connect_target_;
 
     float32 zoom_ = 1.0f;
+    CharacterRig rig_;
+    std::map<PlayerId, CharacterInstance> characters_;
+    float64 last_render_time_ = 0.0;
     std::map<String, ViewModel> view_models_;   // by weapon id
     Vector3 view_eye_;
     bool aiming_ = false;

@@ -48,6 +48,11 @@ public:
     // Resources (destruction is deferred until the GPU no longer uses them)
     // ------------------------------------------------------------------
     MeshHandle CreateMesh(const MeshData& data, const String& name = {});
+    // Mesh whose vertices change every frame (skinned characters). One host visible vertex buffer per
+    // frame in flight; the index buffer is fixed.
+    MeshHandle CreateDynamicMesh(const MeshData& data, const String& name = {});
+    // Replaces the vertices of a dynamic mesh (same count). Call between BeginFrame and the draw calls.
+    bool UpdateDynamicMesh(MeshHandle mesh, const Array<Vertex>& vertices);
     void DestroyMesh(MeshHandle mesh);
     AABB GetMeshBounds(MeshHandle mesh) const;
     bool IsMeshValid(MeshHandle mesh) const;
@@ -103,7 +108,14 @@ private:
         AABB bounds;
         String name;
         bool alive = false;
+        // Dynamic meshes: one mapped vertex buffer per frame in flight
+        uint32 vertex_count = 0;
+        Array<VkBuffer> frame_buffers;
+        Array<VkDeviceMemory> frame_memory;
+        Array<void*> frame_mapped;
     };
+    VkBuffer GetVertexBuffer(const GpuMesh& mesh) const;
+    uint32 StoreMesh(GpuMesh&& mesh);
 
     struct GpuTexture {
         VkImage image = VK_NULL_HANDLE;

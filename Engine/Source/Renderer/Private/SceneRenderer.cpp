@@ -185,6 +185,7 @@ void SceneRenderer::Shutdown() {
         if (!mesh.alive) continue;
         device_->DestroyBuffer(mesh.vertex_buffer, mesh.vertex_memory);
         device_->DestroyBuffer(mesh.index_buffer, mesh.index_memory);
+        for (size_t f = 0; f < mesh.frame_buffers.size(); ++f) device_->DestroyBuffer(mesh.frame_buffers[f], mesh.frame_memory[f]);
     }
     meshes_.clear();
     free_meshes_.clear();
@@ -990,7 +991,10 @@ MeshHandle SceneRenderer::CreateMesh(const MeshData& data, const String& name) {
     mesh.bounds = data.ComputeBounds();
     mesh.name = name;
     mesh.alive = true;
+    return MeshHandle(StoreMesh(std::move(mesh)));
+}
 
+uint32 SceneRenderer::StoreMesh(GpuMesh&& mesh) {
     uint32 id;
     if (!free_meshes_.empty()) {
         id = free_meshes_.back();
@@ -1000,7 +1004,74 @@ MeshHandle SceneRenderer::CreateMesh(const MeshData& data, const String& name) {
         id = static_cast<uint32>(meshes_.size());
         meshes_.push_back(std::move(mesh));
     }
-    return MeshHandle(id);
+    return id;
+}
+
+MeshHandle SceneRenderer::CreateDynamicMesh(const MeshData& data, const String& name) {
+    if (!device_) return MeshHandle();
+    if (data.IsEmpty() || data.indices.size() % 3 != 0) {
+        DRX_LOG_ERROR("Dynamic mesh '{}' is empty or not a triangle list", name);
+        return MeshHandle();
+    }
+    for (uint32 index : data.indices) {
+        if (index >= data.vertices.size()) {
+            DRX_LOG_ERROR("Dynamic mesh '{}' has out-of-range index {}", name, index);
+            return MeshHandle();
+        }
+    }
+
+    GpuMesh mesh;
+    const VkDeviceSize vertex_size = sizeof(Vertex) * data.vertices.size();
+    const VkDeviceSize index_size = sizeof(uint32) * data.indices.size();
+    bool ok = device_->CreateBuffer(index_size, VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                                    VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, mesh.index_buffer, mesh.index_memory) &&
+              device_->UploadBuffer(mesh.index_buffer, data.indices.data(), index_size);
+    const uint32 frames = std::max(1u, device_->GetMaxFramesInFlight());
+    for (uint32 i = 0; ok && i < frames; ++i) {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        void* mapped = nullptr;
+        ok = device_->CreateBuffer(vertex_size, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+                                   VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT, buffer,
+                                   memory) &&
+             vkMapMemory(device_->GetDevice(), memory, 0, vertex_size, 0, &mapped) == VK_SUCCESS;
+        if (buffer != VK_NULL_HANDLE) {
+            mesh.frame_buffers.push_back(buffer);
+            mesh.frame_memory.push_back(memory);
+            mesh.frame_mapped.push_back(mapped);
+        }
+        if (ok) std::memcpy(mapped, data.vertices.data(), static_cast<size_t>(vertex_size));
+    }
+    if (!ok) {
+        device_->DestroyBuffer(mesh.index_buffer, mesh.index_memory);
+        for (size_t i = 0; i < mesh.frame_buffers.size(); ++i) device_->DestroyBuffer(mesh.frame_buffers[i], mesh.frame_memory[i]);
+        DRX_LOG_ERROR("Failed to create dynamic mesh '{}'", name);
+        return MeshHandle();
+    }
+
+    mesh.index_count = static_cast<uint32>(data.indices.size());
+    mesh.vertex_count = static_cast<uint32>(data.vertices.size());
+    mesh.bounds = data.ComputeBounds();
+    mesh.name = name;
+    mesh.alive = true;
+    return MeshHandle(StoreMesh(std::move(mesh)));
+}
+
+bool SceneRenderer::UpdateDynamicMesh(MeshHandle handle, const Array<Vertex>& vertices) {
+    if (!IsMeshValid(handle)) return false;
+    GpuMesh& mesh = meshes_[handle.GetId()];
+    if (mesh.frame_buffers.empty() || vertices.size() != mesh.vertex_count) return false;
+    const uint32 frame = device_->GetCurrentFrameIndex() % static_cast<uint32>(mesh.frame_mapped.size());
+    std::memcpy(mesh.frame_mapped[frame], vertices.data(), sizeof(Vertex) * vertices.size());
+    AABB bounds;
+    for (const Vertex& v : vertices) bounds.Expand(v.position);
+    mesh.bounds = bounds;
+    return true;
+}
+
+VkBuffer SceneRenderer::GetVertexBuffer(const GpuMesh& mesh) const {
+    if (mesh.frame_buffers.empty()) return mesh.vertex_buffer;
+    return mesh.frame_buffers[device_->GetCurrentFrameIndex() % static_cast<uint32>(mesh.frame_buffers.size())];
 }
 
 void SceneRenderer::DestroyMesh(MeshHandle handle) {
@@ -1014,6 +1085,7 @@ void SceneRenderer::DestroyMesh(MeshHandle handle) {
     DeferDestroy([device, mesh]() mutable {
         device->DestroyBuffer(mesh.vertex_buffer, mesh.vertex_memory);
         device->DestroyBuffer(mesh.index_buffer, mesh.index_memory);
+        for (size_t i = 0; i < mesh.frame_buffers.size(); ++i) device->DestroyBuffer(mesh.frame_buffers[i], mesh.frame_memory[i]);
     });
     // The slot may be reused once the deferred destroy has run; reserving it now is safe
     // because the GPU objects were moved out of the slot.
@@ -1439,7 +1511,10 @@ void SceneRenderer::RecordShadowPass(VkCommandBuffer cmd, FrameResources& frame)
 
             if (bound_mesh != item.mesh) {
                 VkDeviceSize offset = 0;
-                vkCmdBindVertexBuffers(cmd, 0, 1, &mesh->vertex_buffer, &offset);
+                {
+                    const VkBuffer vertex_buffer = GetVertexBuffer(*mesh);
+                    vkCmdBindVertexBuffers(cmd, 0, 1, &vertex_buffer, &offset);
+                }
                 vkCmdBindIndexBuffer(cmd, mesh->index_buffer, 0, VK_INDEX_TYPE_UINT32);
                 bound_mesh = item.mesh;
             }
@@ -1518,7 +1593,10 @@ void SceneRenderer::RecordMainPass(VkCommandBuffer cmd, FrameResources& frame) {
 
             if (item.mesh != bound_mesh) {
                 VkDeviceSize offset = 0;
-                vkCmdBindVertexBuffers(cmd, 0, 1, &mesh->vertex_buffer, &offset);
+                {
+                    const VkBuffer vertex_buffer = GetVertexBuffer(*mesh);
+                    vkCmdBindVertexBuffers(cmd, 0, 1, &vertex_buffer, &offset);
+                }
                 vkCmdBindIndexBuffer(cmd, mesh->index_buffer, 0, VK_INDEX_TYPE_UINT32);
                 bound_mesh = item.mesh;
             }

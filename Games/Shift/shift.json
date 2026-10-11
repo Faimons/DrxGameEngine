@@ -7,6 +7,22 @@
         "max_fps": 0
     },
 
+    "character": {
+        "model": "Models/Characters/game_ready_swat_character.glb",
+        "height": 1.8,
+        "yaw_offset": 180,
+        "blend_time": 0.2,
+        "clips": {
+            "idle":  "Animations/Basic Shooter Pack/rifle aiming idle.fbx",
+            "run":   "Animations/Basic Shooter Pack/rifle run.fbx",
+            "back":  "Animations/Basic Shooter Pack/run backwards.fbx",
+            "left":  "Animations/Basic Shooter Pack/strafe left.fbx",
+            "right": "Animations/Basic Shooter Pack/strafe right.fbx",
+            "jump":  "Animations/Basic Shooter Pack/rifle jump.fbx",
+            "death": "Animations/Dying.fbx"
+        }
+    },
+
     "player": {
         "max_health": 100,
         "walk_speed": 5.5,
