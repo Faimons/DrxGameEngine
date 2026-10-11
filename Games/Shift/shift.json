@@ -44,15 +44,19 @@
     "weapons": {
         "rifle":   { "damage": 14, "headshot_multiplier": 1.5, "pellets": 1, "fire_rate": 10,  "automatic": true,
                      "magazine": 30, "reload_time": 2.0, "range": 150, "spread": 0.6,
-                     "model": "Models/Weapons/ak47.glb", "model_scale": 0.18,
+                     "model": "Models/Weapons/ak47.glb", "model_length": 0.88,
                      "view_right": 0.2, "view_down": 0.2, "view_forward": 0.5 },
         "shotgun": { "damage": 9,  "headshot_multiplier": 1.5, "pellets": 8, "fire_rate": 1.2, "automatic": false,
                      "magazine": 6,  "reload_time": 2.5, "range": 60, "spread": 4.0,
                      "falloff_start": 8, "falloff_end": 20, "falloff_min": 0.3 },
         "sniper":  { "damage": 70, "headshot_multiplier": 1.5, "pellets": 1, "fire_rate": 0.8, "automatic": false,
-                     "magazine": 5,  "reload_time": 2.8, "range": 300, "spread": 0.0, "moving_spread": 3.0, "zoom": 3.0 },
+                     "magazine": 5,  "reload_time": 2.8, "range": 300, "spread": 0.0, "moving_spread": 3.0, "zoom": 3.0,
+                     "model": "Models/Weapons/sniper.glb", "model_length": 1.15, "model_yaw": 180,
+                     "view_right": 0.2, "view_down": 0.21, "view_forward": 0.55 },
         "pistol":  { "damage": 20, "headshot_multiplier": 1.5, "pellets": 1, "fire_rate": 5,   "automatic": false,
-                     "magazine": 12, "reload_time": 1.4, "range": 150, "spread": 0.3 }
+                     "magazine": 12, "reload_time": 1.4, "range": 150, "spread": 0.3,
+                     "model": "Models/Weapons/9mm_pistol.glb", "model_length": 0.21, "model_yaw": -90,
+                     "view_right": 0.17, "view_down": 0.16, "view_forward": 0.36 }
     },
 
     "anchor": {

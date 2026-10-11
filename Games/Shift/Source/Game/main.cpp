@@ -48,10 +48,11 @@ struct LaunchOptions {
     String asset_dir;    // folder with Models/ etc.
 };
 
-// First person weapon model, centred on its bounding box
+// Weapon model in its own space: centred, barrel along -Z, top +Y, real length in metres
 struct ViewModel {
     Renderer::Model model;
-    Vector3 center;
+    Matrix4 local;      // orientation and centring
+    float32 length = 0.0f;
 };
 
 Vector4 SurfaceColor(Surface surface) {
@@ -93,6 +94,7 @@ struct PlayerView {
     bool alive = false;
     bool is_protected = false;
     float32 health = 0.0f;
+    String weapon;      // id of the weapon in the hands
 };
 
 // Animated third person character: one rig, named clips, cross-fade between them
@@ -104,6 +106,8 @@ struct CharacterRig {
     float32 foot_offset = 0.0f;
     float32 yaw_offset = 180.0f;
     float32 blend_time = 0.2f;
+    int32 right_hand = -1;
+    int32 left_hand = -1;
     bool loaded = false;
 };
 
@@ -436,6 +440,8 @@ private:
             v.alive = player->alive;
             v.is_protected = player->IsProtected();
             v.health = player->health;
+            const WeaponState& held = SimWorld().IsCarrier(id) ? player->pistol : player->ActiveWeapon();
+            if (held.def) v.weapon = held.def->id;
             views.push_back(v);
         }
         if (mode_ == Mode::Client) {
@@ -453,6 +459,9 @@ private:
                 v.alive = state.alive;
                 v.is_protected = state.protection_timer > 0.0f;
                 v.health = state.health;
+                const WeaponDef* primary = SimWorld().GetLoadoutWeapon(state.primary_index);
+                const bool carrier = SimWorld().IsCarrier(id);
+                v.weapon = state.slot == 0 && primary && !carrier ? primary->id : String("pistol");
                 views.push_back(v);
             }
         }
@@ -645,7 +654,7 @@ private:
         const Matrix4 transform = Matrix4::Translation(view_eye_) * view.ToMatrix() *
                                   Matrix4::Translation(Vector3(right, -down, -forward)) *
                                   Math::Quaternion::FromAxisAngle(Vector3::Forward, tilt * kDegToRad).ToMatrix() *
-                                  Matrix4::Translation(-it->second.center);
+                                  it->second.local;
         Renderer::DrawModel(renderer, it->second.model, transform);
     }
 
@@ -671,6 +680,8 @@ private:
             rig_.bindings[name] = Renderer::BindClip(rig_.model, clips[0]);
             rig_.clips[name] = std::move(clips[0]);
         }
+        rig_.right_hand = rig_.model.FindNode("righthand");
+        rig_.left_hand = rig_.model.FindNode("lefthand");
         rig_.loaded = rig_.clips.count("idle") > 0;
         DRX_LOG_INFO("SHIFT: character {} with {} clips ({})", model, rig_.clips.size(), rig_.loaded ? "ok" : "no idle clip");
     }
@@ -727,6 +738,35 @@ private:
                                   Matrix4::Scale(rig_.scale) * Matrix4::Translation(Vector3(0.0f, rig_.foot_offset, 0.0f));
         const Vector4 tint = player.team == Team::A ? Vector4(0.8f, 0.9f, 1.15f, 1.0f) : Vector4(1.15f, 0.85f, 0.8f, 1.0f);
         character.mesh.Draw(renderer, transform, tint);
+        if (player.alive) DrawHeldWeapon(renderer, player, character, transform);
+    }
+
+    // Weapon in the character's hands: grip in the right hand, barrel towards the left hand
+    void DrawHeldWeapon(Renderer::SceneRenderer& renderer, const PlayerView& player, const CharacterInstance& character,
+                        const Matrix4& transform) {
+        if (rig_.right_hand < 0 || rig_.left_hand < 0) return;
+        const auto it = view_models_.find(player.weapon);
+        if (it == view_models_.end()) return;
+        const Vector3 right_hand = transform.TransformPoint(
+            character.globals[static_cast<size_t>(rig_.right_hand)].TransformPoint(Vector3::Zero));
+        const Vector3 left_hand = transform.TransformPoint(
+            character.globals[static_cast<size_t>(rig_.left_hand)].TransformPoint(Vector3::Zero));
+        Vector3 forward = left_hand - right_hand;
+        // Hands close together (pistol): point where the player looks
+        if (forward.LengthSquared() < 0.01f) forward = FlatForward(player.yaw);
+        forward = forward.Normalized();
+        Vector3 side = Vector3::Cross(forward, Vector3::Up);
+        if (side.LengthSquared() < 1.0e-4f) side = Vector3::Right;
+        side = side.Normalized();
+        const Vector3 up = Vector3::Cross(side, forward);
+        const Vector3 grip = right_hand + forward * (it->second.length * 0.18f);
+
+        Matrix4 basis = Matrix4::Identity();
+        basis[0][0] = side.x;      basis[0][1] = side.y;      basis[0][2] = side.z;
+        basis[1][0] = up.x;        basis[1][1] = up.y;        basis[1][2] = up.z;
+        basis[2][0] = -forward.x;  basis[2][1] = -forward.y;  basis[2][2] = -forward.z;
+        basis[3][0] = grip.x;      basis[3][1] = grip.y;      basis[3][2] = grip.z;
+        Renderer::DrawModel(renderer, it->second.model, basis * it->second.local);
     }
 
     Vector3 CoreRenderPosition() const {
@@ -1008,14 +1048,30 @@ private:
             const String path = (std::filesystem::path(launch_.asset_dir) / def->model).string();
             Renderer::ModelData data;
             Renderer::ModelLoadOptions options;
-            options.scale = def->model_scale;
+            options.scale = def->model_length > 0.0f ? 1.0f : def->model_scale;
             ViewModel view;
-            if (!Renderer::LoadModelData(path, data, options) || !Renderer::UploadModel(renderer, data, view.model)) {
+            if (!Renderer::LoadModelData(path, data, options)) {
                 DRX_LOG_WARNING("SHIFT: weapon model '{}' could not be loaded", path);
                 continue;
             }
-            view.center = data.bounds.GetCenter();
-            const Vector3 size = data.bounds.max - data.bounds.min;
+            Vector3 size = data.bounds.max - data.bounds.min;
+            if (def->model_length > 0.0f) {
+                // Any source unit: scale so the longest side is the weapon's real length
+                const float32 longest = std::max({size.x, size.y, size.z});
+                const float32 factor = longest > 0.0f ? def->model_length / longest : 1.0f;
+                for (Renderer::ModelPart& part : data.parts) {
+                    for (Renderer::Vertex& v : part.mesh.vertices) v.position = v.position * factor;
+                }
+                data.bounds.min = data.bounds.min * factor;
+                data.bounds.max = data.bounds.max * factor;
+                size = size * factor;
+            }
+            if (!Renderer::UploadModel(renderer, data, view.model)) continue;
+            const Math::Quaternion orient = Math::Quaternion::FromAxisAngle(Vector3::Up, def->model_yaw * kDegToRad) *
+                                            Math::Quaternion::FromAxisAngle(Vector3::Right, def->model_pitch * kDegToRad) *
+                                            Math::Quaternion::FromAxisAngle(Vector3::Forward, def->model_roll * kDegToRad);
+            view.local = orient.ToMatrix() * Matrix4::Translation(-data.bounds.GetCenter());
+            view.length = std::max({size.x, size.y, size.z});
             DRX_LOG_INFO("SHIFT: weapon model {} ({:.2f} x {:.2f} x {:.2f} m)", def->model, size.x, size.y, size.z);
             view_models_[def->id] = std::move(view);
         }

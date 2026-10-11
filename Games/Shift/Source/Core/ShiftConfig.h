@@ -50,6 +50,10 @@ struct WeaponDef {
     // First person model (optional): file below the Assets folder, size and place in front of the eye
     String model;
     float32 model_scale = 1.0f;
+    float32 model_length = 0.0f;        // > 0: scale the model so its longest side has this length (metres)
+    float32 model_yaw = 0.0f;           // degrees, turns the model so the barrel points forward (-Z)
+    float32 model_pitch = 0.0f;
+    float32 model_roll = 0.0f;
     float32 view_right = 0.22f;         // metres, camera space
     float32 view_down = 0.22f;
     float32 view_forward = 0.45f;

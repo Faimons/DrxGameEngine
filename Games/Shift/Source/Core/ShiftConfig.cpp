@@ -52,7 +52,11 @@ public:
         Number(prefix + ".falloff_min", w.falloff_min, 0.0f, 1.0f);
         Number(prefix + ".zoom", w.zoom, 1.0f, 10.0f);
         w.model = config_.GetString(prefix + ".model", w.model);
-        Number(prefix + ".model_scale", w.model_scale, 0.001f, 1000.0f);
+        Number(prefix + ".model_scale", w.model_scale, 0.00001f, 1000.0f);
+        Number(prefix + ".model_length", w.model_length, 0.0f, 5.0f);
+        Number(prefix + ".model_yaw", w.model_yaw, -360.0f, 360.0f);
+        Number(prefix + ".model_pitch", w.model_pitch, -360.0f, 360.0f);
+        Number(prefix + ".model_roll", w.model_roll, -360.0f, 360.0f);
         Number(prefix + ".view_right", w.view_right, -2.0f, 2.0f);
         Number(prefix + ".view_down", w.view_down, -2.0f, 2.0f);
         Number(prefix + ".view_forward", w.view_forward, 0.0f, 3.0f);
