@@ -90,6 +90,10 @@ void AddRotatingRoom(Level& level, const Math::Vector3& center, const String& na
 
 } // namespace
 
+void AddRotatingRoomSegments(Level& level, const Math::Vector3& center, const String& name) {
+    AddRotatingRoom(level, center, name);
+}
+
 void Level::AddBox(const Math::Vector3& center, const Math::Vector3& size, Surface surface) {
     LevelBox box;
     box.center = center;
@@ -948,7 +952,11 @@ Array<String> ListLevelFiles(const String& map_dir) {
     std::error_code ec;
     if (map_dir.empty() || !std::filesystem::is_directory(map_dir, ec)) return names;
     for (const auto& entry : std::filesystem::directory_iterator(map_dir, ec)) {
-        if (entry.is_regular_file(ec) && entry.path().extension() == ".json") names.push_back(entry.path().stem().string());
+        // Names starting with '_' are tool files (editor autosave)
+        const String stem = entry.path().stem().string();
+        if (entry.is_regular_file(ec) && entry.path().extension() == ".json" && !stem.empty() && stem[0] != '_') {
+            names.push_back(stem);
+        }
     }
     std::sort(names.begin(), names.end());
     return names;

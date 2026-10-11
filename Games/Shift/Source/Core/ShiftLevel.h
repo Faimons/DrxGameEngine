@@ -86,6 +86,9 @@ Level BuildFactory();
  */
 Level BuildHelix();
 
+// Rotating square room (10 x 10 m, openings west and south, turns -90 degrees with the pattern "Drehraum")
+void AddRotatingRoomSegments(Level& level, const Math::Vector3& center, const String& name);
+
 // Built-in maps: "arena", "fabrik", "helix" or "testroom"
 bool BuildBuiltinLevel(const String& name, Level& level);
 const Array<String>& BuiltinLevelNames();

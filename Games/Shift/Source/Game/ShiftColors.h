@@ -24,6 +24,11 @@ inline Math::Vector4 SurfaceColor(Surface surface) {
     return {1, 1, 1, 1};
 }
 
+// Colour chosen in the editor (w > 0) or the default colour of the surface
+inline Math::Vector4 LookColor(const Math::Vector4& custom, Surface fallback) {
+    return custom.w > 0.0f ? Math::Vector4(custom.x, custom.y, custom.z, 1.0f) : SurfaceColor(fallback);
+}
+
 inline Math::Vector4 TeamColor(Team team) {
     return team == Team::A ? Math::Vector4(0.25f, 0.5f, 1.0f, 1.0f) : Math::Vector4(0.95f, 0.3f, 0.25f, 1.0f);
 }

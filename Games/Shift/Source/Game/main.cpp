@@ -682,7 +682,11 @@ private:
             const SegmentPose pose = def.PoseAt(SegmentAmount(config_.shifts, world.GetPlan(), def, time));
             Renderer::Material material;
             material.albedo = grid_texture_;
-            material.color = SurfaceColor(Surface::Moving);
+            material.color = LookColor(def.color, Surface::Moving);
+            if (def.glow > 0.0f) {
+                material.emissive = Vector3(material.color.x, material.color.y, material.color.z);
+                material.emissive_strength = def.glow;
+            }
             if (warned & GroupBit(def.group)) {
                 // Pulsing red: this wall moves in the next shift
                 material.color = {0.9f, 0.25f, 0.2f, 1.0f};
@@ -1109,8 +1113,12 @@ private:
             render.mesh = mesh;
             render.transform = Matrix4::Translation(box.center);
             render.material.albedo = grid_texture_;
-            render.material.color = SurfaceColor(box.surface);
+            render.material.color = LookColor(box.color, box.surface);
             render.material.cast_shadows = box.casts_shadow;
+            if (box.glow > 0.0f) {
+                render.material.emissive = Vector3(render.material.color.x, render.material.color.y, render.material.color.z);
+                render.material.emissive_strength = box.glow;
+            }
             level_boxes_.push_back(render);
         }
         for (const MovingSegmentDef& segment : level_.segments) {
