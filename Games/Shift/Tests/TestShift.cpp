@@ -1200,3 +1200,71 @@ TEST(ShiftBotFight, BotKillsAVisibleEnemy) {
     }
     EXPECT_GE(kills, 1);
 }
+
+// ============================================================================
+// Map files and map check
+// ============================================================================
+
+class ShiftMapFileTest : public ::testing::TestWithParam<const char*> {};
+
+TEST_P(ShiftMapFileTest, JsonRoundTripKeepsEverything) {
+    Level level;
+    ASSERT_TRUE(BuildBuiltinLevel(GetParam(), level));
+    level.props.push_back({"Models/Props/kiste.glb", Vector3(1.5f, 0.0f, -2.0f), 90.0f, 0.5f});
+    Level loaded;
+    String error;
+    ASSERT_TRUE(LevelFromJson(LevelToJson(level), loaded, &error)) << error;
+    EXPECT_EQ(loaded.name, level.name);
+    EXPECT_EQ(loaded.shift_mode, level.shift_mode);
+    EXPECT_EQ(loaded.has_core, level.has_core);
+    ASSERT_EQ(loaded.boxes.size(), level.boxes.size());
+    ASSERT_EQ(loaded.segments.size(), level.segments.size());
+    ASSERT_EQ(loaded.props.size(), 1u);
+    const auto near = [](const Vector3& a, const Vector3& b) { return (a - b).Length() < 1.0e-4f; };
+    for (size_t i = 0; i < level.boxes.size(); ++i) {
+        EXPECT_TRUE(near(loaded.boxes[i].center, level.boxes[i].center));
+        EXPECT_TRUE(near(loaded.boxes[i].size, level.boxes[i].size));
+        EXPECT_EQ(loaded.boxes[i].surface, level.boxes[i].surface);
+        EXPECT_EQ(loaded.boxes[i].casts_shadow, level.boxes[i].casts_shadow);
+    }
+    for (size_t i = 0; i < level.segments.size(); ++i) {
+        EXPECT_EQ(loaded.segments[i].group, level.segments[i].group);
+        EXPECT_TRUE(near(loaded.segments[i].move, level.segments[i].move));
+        EXPECT_NEAR(loaded.segments[i].rotate, level.segments[i].rotate, 1.0e-4f);
+        EXPECT_TRUE(near(loaded.segments[i].pivot, level.segments[i].pivot));
+    }
+    for (int t = 0; t < 2; ++t) {
+        EXPECT_TRUE(near(loaded.spawns[t].position, level.spawns[t].position));
+        EXPECT_TRUE(near(loaded.exits[t].size, level.exits[t].size));
+    }
+    EXPECT_EQ(loaded.props[0].model, "Models/Props/kiste.glb");
+    EXPECT_NEAR(loaded.props[0].scale, 0.5f, 1.0e-6f);
+}
+
+INSTANTIATE_TEST_SUITE_P(Maps, ShiftMapFileTest, ::testing::Values("arena", "fabrik", "testroom"));
+
+// Match maps (the test room closes its divider on purpose)
+class ShiftMapRoutesTest : public ::testing::TestWithParam<const char*> {};
+
+TEST_P(ShiftMapRoutesTest, EveryWallStateHasRoutes) {
+    Level level;
+    ASSERT_TRUE(BuildBuiltinLevel(GetParam(), level));
+    const Array<String> problems = CheckLevelRoutes(LoadConfig(), level);
+    for (const String& p : problems) ADD_FAILURE() << GetParam() << ": " << p;
+}
+
+INSTANTIATE_TEST_SUITE_P(Maps, ShiftMapRoutesTest, ::testing::Values("arena", "fabrik"));
+
+TEST(ShiftMapFile, BrokenMapsAreReported) {
+    Level level;
+    String error;
+    EXPECT_FALSE(LevelFromJson("{ \"boxes\": [ { \"center\": [0, 0] } ] }", level, &error));
+    EXPECT_FALSE(error.empty());
+    EXPECT_FALSE(LevelFromJson("kein json", level, &error));
+
+    // A wall across the arena cuts team blue off from the core
+    ASSERT_TRUE(BuildBuiltinLevel("testroom", level));
+    level.AddBlock(-6.0f, 6.0f, -0.5f, 0.5f, Surface::Wall);
+    level.segments.clear();
+    EXPECT_FALSE(CheckLevelRoutes(LoadConfig(), level).empty());
+}

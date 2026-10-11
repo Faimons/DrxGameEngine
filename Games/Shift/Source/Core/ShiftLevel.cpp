@@ -5,7 +5,16 @@
 #include "ShiftLevel.h"
 
 #include "Core/Public/Log.h"
+#include "Core/Public/Platform.h"
 
+#include <rapidjson/document.h>
+#include <rapidjson/error/en.h>
+#include <rapidjson/prettywriter.h>
+#include <rapidjson/stringbuffer.h>
+
+#include <algorithm>
+#include <filesystem>
+#include <system_error>
 #include <utility>
 
 namespace Shift {
@@ -441,11 +450,354 @@ Level BuildFactory() {
     return level;
 }
 
-Level BuildLevel(const String& name) {
-    if (name == "testroom") return BuildTestRoom();
-    if (name == "fabrik") return BuildFactory();
-    if (name != "arena") DRX_LOG_WARNING("Unknown map '{}', using the arena", name);
+bool BuildBuiltinLevel(const String& name, Level& level) {
+    if (name == "testroom") level = BuildTestRoom();
+    else if (name == "fabrik") level = BuildFactory();
+    else if (name == "arena") level = BuildArena();
+    else return false;
+    return true;
+}
+
+const Array<String>& BuiltinLevelNames() {
+    static const Array<String> names = {"arena", "fabrik", "testroom"};
+    return names;
+}
+
+Level BuildLevel(const String& name, const String& map_dir) {
+    Level level;
+    if (!map_dir.empty()) {
+        const std::filesystem::path file = std::filesystem::path(map_dir) / (name + ".json");
+        std::error_code ec;
+        if (std::filesystem::exists(file, ec)) {
+            String error;
+            if (LoadLevel(file.string(), level, &error)) return level;
+            DRX_LOG_ERROR("Map '{}': {}", file.string(), error);
+        }
+    }
+    if (BuildBuiltinLevel(name, level)) return level;
+    DRX_LOG_WARNING("Unknown map '{}', using the arena", name);
     return BuildArena();
+}
+
+// ============================================================================
+// Map files
+// ============================================================================
+
+namespace {
+
+struct NamedSurface {
+    Surface surface;
+    const char* id;
+};
+constexpr NamedSurface kSurfaces[] = {
+    {Surface::Floor, "floor"},   {Surface::Wall, "wall"},       {Surface::Ceiling, "ceiling"},
+    {Surface::Cover, "cover"},   {Surface::Step, "step"},       {Surface::SpawnA, "spawn_a"},
+    {Surface::SpawnB, "spawn_b"}, {Surface::Moving, "moving"},
+};
+
+struct NamedGroup {
+    SegmentGroup group;
+    const char* id;
+    const char* name;
+};
+constexpr NamedGroup kGroups[] = {
+    {SegmentGroup::Toggle, "toggle", "Wechsel (jede Verschiebung)"},
+    {SegmentGroup::NorthGates, "north_gates", "Nordtore"},
+    {SegmentGroup::SouthGates, "south_gates", "Suedtore"},
+    {SegmentGroup::MachineRoom, "machine_room", "Drehraum"},
+    {SegmentGroup::CoreDoorsNS, "core_doors_ns", "Kerntueren Nord/Sued"},
+    {SegmentGroup::CoreDoorE, "core_door_e", "Kerntuer Ost"},
+    {SegmentGroup::NorthPanels, "north_panels", "Seitenwaende"},
+};
+
+using JsonWriter = rapidjson::PrettyWriter<rapidjson::StringBuffer>;
+
+void WriteVector(JsonWriter& w, const char* key, const Math::Vector3& v) {
+    w.Key(key);
+    w.SetFormatOptions(rapidjson::kFormatSingleLineArray);
+    w.StartArray();
+    w.Double(static_cast<double>(v.x));
+    w.Double(static_cast<double>(v.y));
+    w.Double(static_cast<double>(v.z));
+    w.EndArray();
+    w.SetFormatOptions(rapidjson::kFormatDefault);
+}
+
+bool ReadVector(const rapidjson::Value& object, const char* key, Math::Vector3& out) {
+    const auto it = object.FindMember(key);
+    if (it == object.MemberEnd() || !it->value.IsArray() || it->value.Size() != 3) return false;
+    for (rapidjson::SizeType i = 0; i < 3; ++i) {
+        if (!it->value[i].IsNumber()) return false;
+    }
+    out = Math::Vector3(it->value[0].GetFloat(), it->value[1].GetFloat(), it->value[2].GetFloat());
+    return true;
+}
+
+float32 ReadFloat(const rapidjson::Value& object, const char* key, float32 fallback) {
+    const auto it = object.FindMember(key);
+    return it != object.MemberEnd() && it->value.IsNumber() ? it->value.GetFloat() : fallback;
+}
+
+bool ReadBool(const rapidjson::Value& object, const char* key, bool fallback) {
+    const auto it = object.FindMember(key);
+    return it != object.MemberEnd() && it->value.IsBool() ? it->value.GetBool() : fallback;
+}
+
+String ReadString(const rapidjson::Value& object, const char* key, const String& fallback) {
+    const auto it = object.FindMember(key);
+    return it != object.MemberEnd() && it->value.IsString() ? String(it->value.GetString()) : fallback;
+}
+
+const rapidjson::Value* ReadArray(const rapidjson::Value& object, const char* key) {
+    const auto it = object.FindMember(key);
+    return it != object.MemberEnd() && it->value.IsArray() ? &it->value : nullptr;
+}
+
+bool Fail(String* error, const String& message) {
+    if (error) *error = message;
+    return false;
+}
+
+} // namespace
+
+const char* SurfaceId(Surface surface) {
+    for (const NamedSurface& s : kSurfaces) {
+        if (s.surface == surface) return s.id;
+    }
+    return "wall";
+}
+
+const char* SegmentGroupId(SegmentGroup group) {
+    for (const NamedGroup& g : kGroups) {
+        if (g.group == group) return g.id;
+    }
+    return "toggle";
+}
+
+const char* SegmentGroupName(SegmentGroup group) {
+    for (const NamedGroup& g : kGroups) {
+        if (g.group == group) return g.name;
+    }
+    return "?";
+}
+
+String LevelToJson(const Level& level) {
+    rapidjson::StringBuffer buffer;
+    JsonWriter w(buffer);
+    w.SetIndent(' ', 2);
+    w.StartObject();
+    w.Key("format");
+    w.Int(1);
+    w.Key("name");
+    w.String(level.name.c_str());
+    w.Key("shift_mode");
+    w.String(level.shift_mode == ShiftMode::ToggleAll ? "toggle" : "patterns");
+
+    w.Key("spawns");
+    w.StartArray();
+    for (const SpawnPoint& spawn : level.spawns) {
+        w.StartObject();
+        WriteVector(w, "position", spawn.position);
+        w.Key("yaw");
+        w.Double(static_cast<double>(spawn.yaw));
+        w.EndObject();
+    }
+    w.EndArray();
+
+    w.Key("core");
+    if (level.has_core) {
+        w.StartObject();
+        WriteVector(w, "position", level.core_home);
+        w.EndObject();
+    } else {
+        w.Null();
+    }
+    w.Key("exits");
+    w.StartArray();
+    for (const ZoneBox& exit : level.exits) {
+        w.StartObject();
+        WriteVector(w, "center", exit.center);
+        WriteVector(w, "size", exit.size);
+        w.EndObject();
+    }
+    w.EndArray();
+
+    w.Key("boxes");
+    w.StartArray();
+    for (const LevelBox& box : level.boxes) {
+        w.StartObject();
+        WriteVector(w, "center", box.center);
+        WriteVector(w, "size", box.size);
+        w.Key("surface");
+        w.String(SurfaceId(box.surface));
+        if (!box.collision) {
+            w.Key("collision");
+            w.Bool(false);
+        }
+        if (!box.casts_shadow) {
+            w.Key("shadow");
+            w.Bool(false);
+        }
+        w.EndObject();
+    }
+    w.EndArray();
+
+    w.Key("segments");
+    w.StartArray();
+    for (const MovingSegmentDef& segment : level.segments) {
+        w.StartObject();
+        w.Key("name");
+        w.String(segment.name.c_str());
+        w.Key("group");
+        w.String(SegmentGroupId(segment.group));
+        WriteVector(w, "center", segment.center);
+        WriteVector(w, "size", segment.size);
+        WriteVector(w, "move", segment.move);
+        w.Key("rotate");
+        w.Double(static_cast<double>(segment.rotate));
+        WriteVector(w, "pivot", segment.pivot);
+        w.EndObject();
+    }
+    w.EndArray();
+
+    w.Key("props");
+    w.StartArray();
+    for (const LevelProp& prop : level.props) {
+        w.StartObject();
+        w.Key("model");
+        w.String(prop.model.c_str());
+        WriteVector(w, "position", prop.position);
+        w.Key("yaw");
+        w.Double(static_cast<double>(prop.yaw));
+        w.Key("scale");
+        w.Double(static_cast<double>(prop.scale));
+        w.EndObject();
+    }
+    w.EndArray();
+    w.EndObject();
+    return String(buffer.GetString(), buffer.GetSize());
+}
+
+bool LevelFromJson(const String& json, Level& out, String* error) {
+    rapidjson::Document doc;
+    doc.Parse(json.c_str(), json.size());
+    if (doc.HasParseError()) {
+        return Fail(error, fmt::format("JSON-Fehler bei Zeichen {}: {}", doc.GetErrorOffset(),
+                                       rapidjson::GetParseError_En(doc.GetParseError())));
+    }
+    if (!doc.IsObject()) return Fail(error, "Kartendatei ist kein JSON-Objekt");
+
+    Level level;
+    level.name = ReadString(doc, "name", "Karte");
+    level.shift_mode = ReadString(doc, "shift_mode", "patterns") == "toggle" ? ShiftMode::ToggleAll : ShiftMode::Patterns;
+
+    if (const rapidjson::Value* spawns = ReadArray(doc, "spawns")) {
+        for (rapidjson::SizeType i = 0; i < spawns->Size() && i < 2; ++i) {
+            const rapidjson::Value& s = (*spawns)[i];
+            if (!s.IsObject() || !ReadVector(s, "position", level.spawns[i].position)) {
+                return Fail(error, fmt::format("Start {} ohne Position", i + 1));
+            }
+            level.spawns[i].yaw = ReadFloat(s, "yaw", 0.0f);
+        }
+    }
+    const auto core = doc.FindMember("core");
+    if (core != doc.MemberEnd() && core->value.IsObject()) {
+        if (!ReadVector(core->value, "position", level.core_home)) return Fail(error, "Kern ohne Position");
+        level.has_core = true;
+    }
+    if (const rapidjson::Value* exits = ReadArray(doc, "exits")) {
+        for (rapidjson::SizeType i = 0; i < exits->Size() && i < 2; ++i) {
+            const rapidjson::Value& e = (*exits)[i];
+            if (!e.IsObject() || !ReadVector(e, "center", level.exits[i].center) || !ReadVector(e, "size", level.exits[i].size)) {
+                return Fail(error, fmt::format("Ausgang {} unvollstaendig", i + 1));
+            }
+        }
+    }
+    if (const rapidjson::Value* boxes = ReadArray(doc, "boxes")) {
+        for (rapidjson::SizeType i = 0; i < boxes->Size(); ++i) {
+            const rapidjson::Value& b = (*boxes)[i];
+            LevelBox box;
+            if (!b.IsObject() || !ReadVector(b, "center", box.center) || !ReadVector(b, "size", box.size)) {
+                return Fail(error, fmt::format("Block {} unvollstaendig", i + 1));
+            }
+            if (box.size.x <= 0.0f || box.size.y <= 0.0f || box.size.z <= 0.0f) {
+                return Fail(error, fmt::format("Block {} hat keine Groesse", i + 1));
+            }
+            const String surface = ReadString(b, "surface", "wall");
+            for (const NamedSurface& s : kSurfaces) {
+                if (surface == s.id) box.surface = s.surface;
+            }
+            box.collision = ReadBool(b, "collision", true);
+            box.casts_shadow = ReadBool(b, "shadow", box.surface != Surface::Ceiling);
+            level.boxes.push_back(box);
+        }
+    }
+    if (const rapidjson::Value* segments = ReadArray(doc, "segments")) {
+        for (rapidjson::SizeType i = 0; i < segments->Size(); ++i) {
+            const rapidjson::Value& s = (*segments)[i];
+            MovingSegmentDef def;
+            if (!s.IsObject() || !ReadVector(s, "center", def.center) || !ReadVector(s, "size", def.size)) {
+                return Fail(error, fmt::format("Bewegliche Wand {} unvollstaendig", i + 1));
+            }
+            def.name = ReadString(s, "name", fmt::format("Wand {}", i + 1));
+            const String group = ReadString(s, "group", "toggle");
+            for (const NamedGroup& g : kGroups) {
+                if (group == g.id) def.group = g.group;
+            }
+            ReadVector(s, "move", def.move);
+            def.rotate = ReadFloat(s, "rotate", 0.0f);
+            ReadVector(s, "pivot", def.pivot);
+            level.segments.push_back(def);
+        }
+    }
+    if (const rapidjson::Value* props = ReadArray(doc, "props")) {
+        for (rapidjson::SizeType i = 0; i < props->Size(); ++i) {
+            const rapidjson::Value& p = (*props)[i];
+            LevelProp prop;
+            prop.model = p.IsObject() ? ReadString(p, "model", "") : "";
+            if (prop.model.empty() || !ReadVector(p, "position", prop.position)) {
+                return Fail(error, fmt::format("Deko {} unvollstaendig", i + 1));
+            }
+            prop.yaw = ReadFloat(p, "yaw", 0.0f);
+            prop.scale = std::max(0.0001f, ReadFloat(p, "scale", 1.0f));
+            level.props.push_back(prop);
+        }
+    }
+    out = std::move(level);
+    return true;
+}
+
+bool SaveLevel(const Level& level, const String& path, String* error) {
+    std::error_code ec;
+    const std::filesystem::path parent = std::filesystem::path(path).parent_path();
+    if (!parent.empty()) std::filesystem::create_directories(parent, ec);
+    // Write to a temporary file first so a crash never leaves a half written map
+    const String temp = path + ".tmp";
+    if (!Platform::FileSystem::WriteTextFile(temp, LevelToJson(level))) return Fail(error, fmt::format("'{}' nicht schreibbar", path));
+    std::filesystem::rename(temp, path, ec);
+    if (ec) {
+        std::filesystem::remove(path, ec);
+        std::filesystem::rename(temp, path, ec);
+        if (ec) return Fail(error, fmt::format("'{}' nicht schreibbar: {}", path, ec.message()));
+    }
+    return true;
+}
+
+bool LoadLevel(const String& path, Level& level, String* error) {
+    const Result<String> text = Platform::FileSystem::ReadTextFile(path);
+    if (!text) return Fail(error, fmt::format("'{}' nicht lesbar", path));
+    return LevelFromJson(text.Value(), level, error);
+}
+
+Array<String> ListLevelFiles(const String& map_dir) {
+    Array<String> names;
+    std::error_code ec;
+    if (map_dir.empty() || !std::filesystem::is_directory(map_dir, ec)) return names;
+    for (const auto& entry : std::filesystem::directory_iterator(map_dir, ec)) {
+        if (entry.is_regular_file(ec) && entry.path().extension() == ".json") names.push_back(entry.path().stem().string());
+    }
+    std::sort(names.begin(), names.end());
+    return names;
 }
 
 } // namespace Shift

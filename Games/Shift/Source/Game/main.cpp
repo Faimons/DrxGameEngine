@@ -5,6 +5,7 @@
  *   1 / --offline            against a computer opponent
  *   2 / --host               host a duel: you play on the server, a friend joins
  *   3 / --connect [ip:port]  join a host (default: net.server_address from shift.json)
+ *   4 / --editor             map editor (F1 in a test game returns to the editor)
  *
  * Controls: mouse look, WASD move, Space jump, LMB fire, R reload, hold E to pick up the core,
  *           Esc releases the mouse (Esc again quits), click to capture, F11 fullscreen, F12 screenshot
@@ -15,6 +16,8 @@
 #include "../Core/ShiftLevel.h"
 #include "../Core/ShiftNet.h"
 #include "../Core/ShiftWorld.h"
+#include "ShiftColors.h"
+#include "ShiftEditor.h"
 
 #include "Audio/Public/SoundSynth.h"
 #include "Core/Public/Log.h"
@@ -41,7 +44,7 @@ namespace {
 constexpr float32 kPi = 3.14159265358979323846f;
 constexpr float32 kDegToRad = kPi / 180.0f;
 
-enum class Mode { Menu, Offline, Host, Client };
+enum class Mode { Menu, Offline, Host, Client, Editor };
 
 struct LaunchOptions {
     Mode mode = Mode::Menu;
@@ -56,23 +59,6 @@ struct ViewModel {
     float32 length = 0.0f;
 };
 
-Vector4 SurfaceColor(Surface surface) {
-    switch (surface) {
-        case Surface::Floor: return {0.55f, 0.56f, 0.58f, 1.0f};
-        case Surface::Wall: return {0.72f, 0.72f, 0.74f, 1.0f};
-        case Surface::Ceiling: return {0.6f, 0.6f, 0.62f, 1.0f};
-        case Surface::Cover: return {0.85f, 0.55f, 0.25f, 1.0f};
-        case Surface::Step: return {0.6f, 0.75f, 0.6f, 1.0f};
-        case Surface::SpawnA: return {0.2f, 0.45f, 1.0f, 1.0f};
-        case Surface::SpawnB: return {1.0f, 0.3f, 0.25f, 1.0f};
-        case Surface::Moving: return {0.55f, 0.6f, 0.75f, 1.0f};
-    }
-    return {1, 1, 1, 1};
-}
-
-Vector4 TeamColor(Team team) {
-    return team == Team::A ? Vector4(0.25f, 0.5f, 1.0f, 1.0f) : Vector4(0.95f, 0.3f, 0.25f, 1.0f);
-}
 
 const char* TeamName(Team team) {
     return team == Team::A ? "Team Blau" : "Team Rot";
@@ -139,6 +125,7 @@ protected:
             case Mode::Offline: return StartOffline();
             case Mode::Host: return StartHost();
             case Mode::Client: return StartClient(launch_.address);
+            case Mode::Editor: OpenEditor(); return true;
             case Mode::Menu: break;
         }
         SetMouseCaptured(false);
@@ -146,6 +133,7 @@ protected:
     }
 
     void OnShutdown() override {
+        if (editor_.IsOpen()) editor_.Close(GetRenderer());
         if (mode_ == Mode::Client) client_.Disconnect(Platform::GetTimeSeconds());
         server_.Stop();
         world_.Shutdown();
@@ -156,6 +144,14 @@ protected:
         Input::InputSystem& input = GetInput();
         if (mode_ == Mode::Menu) {
             UpdateMenu();
+            return;
+        }
+        if (mode_ == Mode::Editor) {
+            UpdateEditor(dt);
+            return;
+        }
+        if (testing_map_ && input.IsKeyPressed(Input::KeyCode::F1)) {
+            ReturnToEditor();
             return;
         }
         if (input.IsKeyPressed(Input::KeyCode::Escape)) {
@@ -195,6 +191,7 @@ protected:
         const float64 now = Platform::GetTimeSeconds();
         switch (mode_) {
             case Mode::Menu:
+            case Mode::Editor:
                 return;
             case Mode::Offline:
             case Mode::Host: {
@@ -227,7 +224,12 @@ protected:
     }
 
     void OnRender(Renderer::SceneRenderer& renderer) override {
+        if (mode_ == Mode::Editor) {
+            editor_.Render(renderer);
+            return;
+        }
         if (!graphics_ready_) return;
+        DrawProps(renderer);
         for (const RenderBox& box : level_boxes_) renderer.DrawMesh(box.mesh, box.transform, box.material);
         DrawSegments(renderer);
         DrawExitsAndCore(renderer);
@@ -270,6 +272,11 @@ protected:
             DrawMenu(ui, w, h);
             return;
         }
+        if (mode_ == Mode::Editor) {
+            editor_.DrawUI(ui, GetInput(), w, h);
+            return;
+        }
+        if (testing_map_) ui.DrawText("F1: zurueck zum Editor", w - 250.0f, 16.0f, {1.0f, 0.85f, 0.4f, 1.0f}, 20.0f);
         if (mode_ == Mode::Client && !client_.IsReady()) {
             DrawConnecting(ui, w, h);
             return;
@@ -324,9 +331,11 @@ private:
     ShiftWorld& SimWorld() { return mode_ == Mode::Client ? client_.GetWorld() : world_; }
     const ShiftWorld& SimWorld() const { return mode_ == Mode::Client ? client_.GetWorld() : world_; }
 
-    bool StartWorld(bool with_bot) {
+    String MapDir() const { return (std::filesystem::path(launch_.asset_dir) / "Maps").string(); }
+
+    bool StartWorld(bool with_bot, const Level* custom = nullptr) {
         if (!world_.Initialize(config_, true)) return false;
-        level_ = BuildLevel(config_.round.map);
+        level_ = custom ? *custom : BuildLevel(config_.round.map, MapDir());
         level_.Apply(world_);
         local_id_ = world_.AddPlayer(Team::A);
         if (local_id_ == kInvalidPlayer) return false;
@@ -372,7 +381,9 @@ private:
             status_error_ = fmt::format("Adresse '{}' ungueltig", text);
             return true;
         }
-        client_.Connect(config_, address, Platform::GetTimeSeconds(), BuildLevel, Conditioner());
+        const String map_dir = MapDir();
+        client_.Connect(config_, address, Platform::GetTimeSeconds(),
+                        [map_dir](const String& map) { return BuildLevel(map, map_dir); }, Conditioner());
         return true;
     }
 
@@ -388,19 +399,73 @@ private:
         return HashU32(static_cast<uint32>(Platform::GetTimeMilliseconds()), 0x5348u, 0x4946u) | 1u;
     }
 
+    // Maps from Assets/Maps first, then the built-in ones
+    Array<String> MapNames() const {
+        Array<String> maps = ListLevelFiles(MapDir());
+        for (const String& builtin : BuiltinLevelNames()) {
+            if (std::find(maps.begin(), maps.end(), builtin) == maps.end()) maps.push_back(builtin);
+        }
+        return maps;
+    }
+
+    // ------------------------------------------------------------------ editor
+
+    void OpenEditor() {
+        mode_ = Mode::Editor;
+        if (!editor_.IsOpen()) editor_.Open(GetRenderer(), config_, launch_.asset_dir, config_.round.map);
+        SetMouseCaptured(false);
+    }
+
+    void UpdateEditor(float32 dt) {
+        Input::InputSystem& input = GetInput();
+        const bool look = editor_.WantsMouseLook(input);
+        if (look != IsMouseCaptured()) SetMouseCaptured(look);
+        editor_.Update(input, dt, GetUI().GetScreenWidth(), GetUI().GetScreenHeight(), look && IsMouseCaptured());
+        GetCamera() = editor_.GetCamera(GetAspectRatio());
+        switch (editor_.TakeRequest()) {
+            case MapEditor::Request::Play: {
+                // Test game with a bot on the map as it is in the editor (saved or not)
+                SetMouseCaptured(false);
+                mode_ = Mode::Offline;
+                testing_map_ = true;
+                if (!StartWorld(true, &editor_.GetLevel())) ReturnToEditor();
+                break;
+            }
+            case MapEditor::Request::Exit:
+                editor_.Close(GetRenderer());
+                mode_ = Mode::Menu;
+                SetMouseCaptured(false);
+                break;
+            case MapEditor::Request::None:
+                break;
+        }
+    }
+
+    void ReturnToEditor() {
+        world_.Shutdown();
+        DestroyGraphics();
+        bots_.Clear();
+        characters_.clear();
+        previous_feet_.clear();
+        testing_map_ = false;
+        mode_ = Mode::Editor;
+        SetMouseCaptured(false);
+    }
+
     void UpdateMenu() {
         Input::InputSystem& input = GetInput();
         bool ok = true;
         if (input.IsKeyPressed(Input::KeyCode::Num1)) ok = StartOffline();
         else if (input.IsKeyPressed(Input::KeyCode::Num2)) ok = StartHost();
         else if (input.IsKeyPressed(Input::KeyCode::Num3)) ok = StartClient("");
+        else if (input.IsKeyPressed(Input::KeyCode::Num4)) OpenEditor();
         else if (input.IsKeyPressed(Input::KeyCode::M)) {
-            static const char* const kMaps[] = {"arena", "fabrik", "testroom"};
+            const Array<String> maps = MapNames();
             size_t next = 0;
-            for (size_t i = 0; i < 3; ++i) {
-                if (config_.round.map == kMaps[i]) next = (i + 1) % 3;
+            for (size_t i = 0; i < maps.size(); ++i) {
+                if (config_.round.map == maps[i]) next = (i + 1) % maps.size();
             }
-            config_.round.map = kMaps[next];
+            config_.round.map = maps[next];
         } else if (input.IsKeyPressed(Input::KeyCode::Escape)) RequestQuit();
         if (!ok) {
             DRX_LOG_ERROR("SHIFT: could not start the game");
@@ -628,6 +693,17 @@ private:
         }
     }
 
+    void DrawProps(Renderer::SceneRenderer& renderer) {
+        for (const LevelProp& prop : level_.props) {
+            const auto it = prop_models_.find(prop.model);
+            if (it == prop_models_.end() || !it->second.IsValid()) continue;
+            Renderer::DrawModel(renderer, it->second,
+                                Matrix4::Translation(prop.position) *
+                                    Math::Quaternion::FromAxisAngle(Vector3::Up, prop.yaw * kDegToRad).ToMatrix() *
+                                    Matrix4::Scale(prop.scale));
+        }
+    }
+
     // Weapon in the hand: camera space offset, walk bob, recoil kick and a dip while reloading
     void DrawViewModel(Renderer::SceneRenderer& renderer) {
         const SimPlayer* me = SimWorld().GetPlayer(local_id_);
@@ -826,6 +902,7 @@ private:
         line("1   Gegen Bot spielen", {1, 1, 1, 1}, 32.0f);
         line(fmt::format("2   Duell hosten (Port {})", config_.net.port), {1, 1, 1, 1}, 32.0f);
         line(fmt::format("3   Beitreten ({})", config_.net.server_address), {1, 1, 1, 1}, 32.0f);
+        line("4   Karten-Editor", {1, 1, 1, 1}, 32.0f);
         line(fmt::format("M   Karte: {}", config_.round.map), {1.0f, 0.85f, 0.4f, 1.0f}, 32.0f);
         line("Esc  Beenden", {1, 1, 1, 0.7f}, 32.0f);
         y += 20.0f;
@@ -992,7 +1069,8 @@ private:
             case Mode::Client:
                 line = fmt::format("Client  Ping {:.0f} ms  Korrekturen {}", client_.GetStats().rtt_ms, client_.GetStats().corrections);
                 break;
-            case Mode::Menu: break;
+            case Mode::Menu:
+            case Mode::Editor: break;
         }
         ui.DrawRect({10, 10, 380, 56}, {0, 0, 0, 0.5f});
         ui.DrawText(fmt::format("{:.0f} FPS   Tick {}", GetFPS(), SimWorld().GetTick()), 20, 16, {1, 1, 1, 1});
@@ -1081,6 +1159,16 @@ private:
             DRX_LOG_INFO("SHIFT: weapon model {} ({:.2f} x {:.2f} x {:.2f} m)", def->model, size.x, size.y, size.z);
             view_models_[def->id] = std::move(view);
         }
+        for (const LevelProp& prop : level_.props) {
+            if (prop_models_.count(prop.model)) continue;
+            Renderer::ModelData data;
+            Renderer::Model model;
+            const String path = (std::filesystem::path(launch_.asset_dir) / prop.model).string();
+            if (!Renderer::LoadModelData(path, data) || !Renderer::UploadModel(renderer, data, model)) {
+                DRX_LOG_WARNING("SHIFT: decoration '{}' could not be loaded", path);
+            }
+            prop_models_[prop.model] = std::move(model);
+        }
         LoadCharacterRig();
         graphics_ready_ = true;
     }
@@ -1091,6 +1179,10 @@ private:
         meshes_.clear();
         for (auto& [def, view] : view_models_) Renderer::ReleaseModel(renderer, view.model);
         view_models_.clear();
+        for (auto& [path, model] : prop_models_) Renderer::ReleaseModel(renderer, model);
+        prop_models_.clear();
+        level_boxes_.clear();
+        segment_meshes_.clear();
         for (auto& [id, character] : characters_) character.mesh.Release(renderer);
         characters_.clear();
         if (grid_texture_.IsValid()) renderer.DestroyTexture(grid_texture_);
@@ -1148,6 +1240,9 @@ private:
     Level level_;
     PlayerId local_id_ = kInvalidPlayer;
     BotDirector bots_;
+    MapEditor editor_;
+    bool testing_map_ = false;
+    std::map<String, Renderer::Model> prop_models_;
     std::map<PlayerId, Vector3> previous_feet_;
     String status_error_;
     String connect_target_;
@@ -1195,6 +1290,7 @@ LaunchOptions ParseLaunch(int argc, char** argv) {
         const String arg = argv[i];
         if (arg == "--offline") launch.mode = Mode::Offline;
         else if (arg == "--host") launch.mode = Mode::Host;
+        else if (arg == "--editor") launch.mode = Mode::Editor;
         else if (arg == "--connect") {
             launch.mode = Mode::Client;
             if (i + 1 < argc && argv[i + 1][0] != '-') launch.address = argv[++i];

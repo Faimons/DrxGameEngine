@@ -159,6 +159,8 @@ public:
     void AddStaticBox(const Math::Vector3& center, const Math::Vector3& size);
     size_t AddSegment(const MovingSegmentDef& segment);
     const Array<SimSegment>& GetSegments() const { return segments_; }
+    // Puts every segment into its end state (bit set = state 1) regardless of the round clock (tools)
+    void SetSegmentState(GroupMask state);
     void SetShiftMode(ShiftMode mode) { shift_mode_ = mode; }
     void SetSpawn(Team team, const SpawnPoint& spawn) { spawns_[static_cast<size_t>(team)] = spawn; }
     const SpawnPoint& GetSpawn(Team team) const { return spawns_[static_cast<size_t>(team)]; }

@@ -45,6 +45,13 @@ private:
     Array<float32> segment_amounts_;
 };
 
+/**
+ * Map check for the editor and the tests: in every wall state the plan can produce, both teams must
+ * reach the core and the core must reach both exits (without core: the starts must reach each other).
+ * Returns the problems found (German, for the editor), empty when the map is fine.
+ */
+Array<String> CheckLevelRoutes(const ShiftConfig& config, const Level& level);
+
 class BotDirector {
 public:
     void Build(ShiftWorld& world, const Level& level);

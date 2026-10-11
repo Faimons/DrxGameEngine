@@ -32,9 +32,18 @@ struct LevelBox {
     bool casts_shadow = true;
 };
 
+// Decoration model (render only), path below the Assets folder
+struct LevelProp {
+    String model;
+    Math::Vector3 position;
+    float32 yaw = 0.0f;      // degrees
+    float32 scale = 1.0f;
+};
+
 struct Level {
     String name;
     Array<LevelBox> boxes;
+    Array<LevelProp> props;
     Array<MovingSegmentDef> segments;
     SpawnPoint spawns[2];
     ShiftMode shift_mode = ShiftMode::Patterns;
@@ -68,7 +77,26 @@ Level BuildArena();
  */
 Level BuildFactory();
 
-// "arena", "fabrik" or "testroom"
-Level BuildLevel(const String& name);
+// Built-in maps: "arena", "fabrik" or "testroom"
+bool BuildBuiltinLevel(const String& name, Level& level);
+const Array<String>& BuiltinLevelNames();
+
+/**
+ * Map by name: `<map_dir>/<name>.json` when that file exists (maps from the editor), otherwise the
+ * built-in map of that name, otherwise the arena.
+ */
+Level BuildLevel(const String& name, const String& map_dir = "");
+
+// Map files (JSON)
+String LevelToJson(const Level& level);
+bool LevelFromJson(const String& json, Level& level, String* error = nullptr);
+bool SaveLevel(const Level& level, const String& path, String* error = nullptr);
+bool LoadLevel(const String& path, Level& level, String* error = nullptr);
+// Names of the map files in a folder (without .json), sorted
+Array<String> ListLevelFiles(const String& map_dir);
+
+const char* SurfaceId(Surface surface);
+const char* SegmentGroupId(SegmentGroup group);
+const char* SegmentGroupName(SegmentGroup group);   // German display name
 
 } // namespace Shift

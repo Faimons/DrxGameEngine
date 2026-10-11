@@ -14,7 +14,7 @@ target_include_directories(ShiftCore PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/Source/C
 target_link_libraries(ShiftCore PUBLIC DRXEngine)
 drx_set_warnings(ShiftCore)
 
-add_executable(ShiftGame Source/Game/main.cpp)
+add_executable(ShiftGame Source/Game/main.cpp Source/Game/ShiftEditor.cpp)
 target_link_libraries(ShiftGame PRIVATE ShiftCore)
 target_compile_definitions(ShiftGame PRIVATE SHIFT_CONFIG_PATH="${CMAKE_CURRENT_SOURCE_DIR}/shift.json"
                                              SHIFT_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/Assets")

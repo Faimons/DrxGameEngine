@@ -4,6 +4,8 @@
 
 #include "ShiftBot.h"
 
+#include "Core/Public/Log.h"
+
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -272,6 +274,64 @@ bool NavGrid::FindPath(const Math::Vector3& from, const Math::Vector3& to, Array
     std::reverse(path.begin(), path.end());
     if (path.empty()) path.push_back(CellCenter(goal_x, goal_z));
     return true;
+}
+
+// ============================================================================
+// Map check
+// ============================================================================
+
+Array<String> CheckLevelRoutes(const ShiftConfig& config, const Level& level) {
+    Array<String> problems;
+    GroupMask groups = 0;
+    for (const MovingSegmentDef& segment : level.segments) groups |= GroupBit(segment.group);
+
+    // Every wall state that rounds can reach (several seeds, long rounds)
+    struct State {
+        GroupMask mask;
+        ShiftPattern pattern;
+    };
+    Array<State> states;
+    const auto add_state = [&](GroupMask mask, ShiftPattern pattern) {
+        mask &= groups;
+        for (const State& s : states) {
+            if (s.mask == mask) return;
+        }
+        states.push_back({mask, pattern});
+    };
+    add_state(ShiftPlan::InitialState(), ShiftPattern::None);
+    for (uint32 seed = 1; seed <= 8; ++seed) {
+        const ShiftPlan plan(level.shift_mode, seed, groups, config.shifts.all_open_max_per);
+        for (int32 shift = 1; shift <= 40; ++shift) add_state(plan.GetStateAfter(shift), plan.GetPattern(shift));
+    }
+
+    const Math::Vector3 start_a = level.spawns[0].position;
+    const Math::Vector3 start_b = level.spawns[1].position;
+    for (const State& state : states) {
+        ShiftWorld world;
+        if (!world.Initialize(config)) {
+            problems.push_back("Pruefung nicht moeglich (Physik)");
+            return problems;
+        }
+        level.Apply(world);
+        world.SetSegmentState(state.mask);
+        NavGrid grid;
+        grid.Build(world, level);
+        Array<Math::Vector3> path;
+        const String when = state.pattern == ShiftPattern::None ? String("Startzustand")
+                                                                : fmt::format("nach '{}'", PatternName(state.pattern));
+        const auto require = [&](const Math::Vector3& from, const Math::Vector3& to, const char* what) {
+            if (!grid.FindPath(from, to, path)) problems.push_back(fmt::format("{}: kein Weg {}", when, what));
+        };
+        if (level.has_core) {
+            require(start_a, level.core_home, "von Start Blau zum Kern");
+            require(start_b, level.core_home, "von Start Rot zum Kern");
+            require(level.core_home, level.exits[0].center, "vom Kern zum Ausgang Blau");
+            require(level.core_home, level.exits[1].center, "vom Kern zum Ausgang Rot");
+        } else {
+            require(start_a, start_b, "zwischen den Starts");
+        }
+    }
+    return problems;
 }
 
 // ============================================================================

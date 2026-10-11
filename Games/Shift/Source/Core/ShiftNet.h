@@ -108,7 +108,8 @@ public:
     ~ShiftClient();
 
     bool Connect(const ShiftConfig& config, const Network::Address& server, float64 now,
-                 LevelFactory level_factory = BuildLevel, const Network::ConditionerSettings& conditioner = {});
+                 LevelFactory level_factory = [](const String& map) { return BuildLevel(map); },
+                 const Network::ConditionerSettings& conditioner = {});
     void Disconnect(float64 now);
 
     // Per tick: Receive -> Tick(input) -> Flush

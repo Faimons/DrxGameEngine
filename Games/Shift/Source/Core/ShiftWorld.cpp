@@ -479,6 +479,18 @@ void ShiftWorld::UpdateSegments() {
     }
 }
 
+void ShiftWorld::SetSegmentState(GroupMask state) {
+    for (SimSegment& segment : segments_) {
+        segment.amount = (state & GroupBit(segment.def.group)) ? 1.0f : 0.0f;
+        segment.pose = segment.def.PoseAt(segment.amount);
+        if (!segment.body) continue;
+        Math::Transform transform;
+        transform.position = segment.pose.center;
+        transform.rotation = segment.pose.Rotation();
+        segment.body->SetTransform(transform);
+    }
+}
+
 void ShiftWorld::RecordHistory() {
     for (auto& [id, player] : players_) player->history.Store(tick_, {player->GetFeet(), player->alive});
 }
