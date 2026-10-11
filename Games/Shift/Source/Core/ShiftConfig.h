@@ -47,6 +47,12 @@ struct WeaponDef {
     float32 falloff_end = 0.0f;
     float32 falloff_min = 1.0f;         // damage factor at and beyond falloff_end
     float32 zoom = 1.0f;                // field of view divisor while aiming
+    // First person model (optional): file below the Assets folder, size and place in front of the eye
+    String model;
+    float32 model_scale = 1.0f;
+    float32 view_right = 0.22f;         // metres, camera space
+    float32 view_down = 0.22f;
+    float32 view_forward = 0.45f;
 };
 
 struct WeaponSettings {

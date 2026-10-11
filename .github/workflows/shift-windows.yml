@@ -63,6 +63,7 @@ jobs:
           Copy-Item build/bin/Release/ShiftGame.exe $out
           Get-ChildItem build/bin/Release -Filter *.dll | Copy-Item -Destination $out
           Copy-Item Games/Shift/shift.json $out
+          Copy-Item -Recurse Games/Shift/Assets (Join-Path $out "Assets")
           Get-ChildItem $out
 
       - name: Upload

@@ -20,6 +20,7 @@
 #include "Core/Public/Platform.h"
 #include "Debug/Public/DebugSystem.h"
 #include "Renderer/Public/MeshBuilder.h"
+#include "Renderer/Public/ModelLoader.h"
 #include "Runtime/Public/Application.h"
 
 #include <algorithm>
@@ -42,7 +43,14 @@ enum class Mode { Menu, Offline, Host, Client };
 
 struct LaunchOptions {
     Mode mode = Mode::Menu;
-    String address;   // client: "host[:port]"
+    String address;      // client: "host[:port]"
+    String asset_dir;    // folder with Models/ etc.
+};
+
+// First person weapon model, centred on its bounding box
+struct ViewModel {
+    Renderer::Model model;
+    Vector3 center;
 };
 
 Vector4 SurfaceColor(Surface surface) {
@@ -144,6 +152,8 @@ protected:
         if (!input.IsMouseButtonDown(Input::MouseButton::Left)) swallow_fire_ = false;
 
         hit_marker_ = std::max(0.0f, hit_marker_ - dt);
+        recoil_ = std::max(0.0f, recoil_ - dt * 9.0f);
+        bob_phase_ += dt * view_speed_ * 1.8f;
         damage_flash_ = std::max(0.0f, damage_flash_ - dt);
         announcement_time_ = std::max(0.0f, announcement_time_ - dt);
         UpdateCamera();
@@ -188,6 +198,8 @@ protected:
         for (const RenderBox& box : level_boxes_) renderer.DrawMesh(box.mesh, box.transform, box.material);
         DrawSegments(renderer);
         DrawExitsAndCore(renderer);
+
+        DrawViewModel(renderer);
 
         for (const PlayerView& player : CollectPlayers()) {
             if (player.id == local_id_ || !player.alive) continue;
@@ -432,6 +444,7 @@ private:
                 // One synthesized shot, pitched per weapon: rifle, shotgun, sniper, pistol
                 static constexpr float32 kPitch[] = {1.25f, 0.7f, 0.55f, 1.0f};
                 const float32 pitch = kPitch[std::min<uint8>(event.weapon, 3)];
+                if (mine) recoil_ = 1.0f;
                 if (mine) audio.PlayOneShot2D(shot_sound_, 0.6f, pitch);
                 else audio.PlayOneShot(shot_sound_, event.from, 0.8f, pitch);
                 break;
@@ -524,6 +537,10 @@ private:
         GetCamera() = Renderer::CameraParams::LookAt(eye, eye + LookDirection(look_yaw_, look_pitch_),
                                                      config_.player.fov / zoom * kDegToRad, GetAspectRatio(), 0.03f, 300.0f);
         zoom_ = zoom;
+        view_eye_ = eye;
+        aiming_ = aiming;
+        const Vector3 v = me->controller->GetVelocity();
+        view_speed_ = me->IsGrounded() ? std::sqrt(v.x * v.x + v.z * v.z) : 0.0f;
     }
 
     // ------------------------------------------------------------------ world drawing
@@ -549,6 +566,42 @@ private:
             }
             renderer.DrawMesh(segment_meshes_[i], Matrix4::Translation(pose.center) * pose.Rotation().ToMatrix(), material);
         }
+    }
+
+    // Weapon in the hand: camera space offset, walk bob, recoil kick and a dip while reloading
+    void DrawViewModel(Renderer::SceneRenderer& renderer) {
+        const SimPlayer* me = SimWorld().GetPlayer(local_id_);
+        if (!me || !me->alive) return;
+        const WeaponState& weapon = SimWorld().IsCarrier(local_id_) ? me->pistol : me->ActiveWeapon();
+        if (!weapon.def) return;
+        const auto it = view_models_.find(weapon.def->id);
+        if (it == view_models_.end()) return;
+        if (aiming_ && weapon.def->zoom > 1.5f) return;   // scope view
+
+        const WeaponDef& def = *weapon.def;
+        float32 right = aiming_ ? 0.0f : def.view_right;
+        float32 down = aiming_ ? def.view_down * 0.6f : def.view_down;
+        float32 forward = def.view_forward;
+        float32 tilt = 0.0f;
+        if (weapon.IsReloading()) {
+            const float32 progress = 1.0f - weapon.reload_timer / std::max(0.01f, def.reload_time);
+            const float32 dip = std::sin(progress * kPi);
+            down += 0.18f * dip;
+            tilt = 25.0f * dip;
+        }
+        const float32 bob = std::min(1.0f, view_speed_ / 5.5f);
+        right += 0.012f * bob * std::sin(bob_phase_);
+        down += 0.010f * bob * std::abs(std::cos(bob_phase_));
+        forward -= 0.05f * recoil_;
+        down -= 0.012f * recoil_;
+
+        const Math::Quaternion view = Math::Quaternion::FromAxisAngle(Vector3::Up, -look_yaw_ * kDegToRad) *
+                                      Math::Quaternion::FromAxisAngle(Vector3::Right, (look_pitch_ + 3.0f * recoil_) * kDegToRad);
+        const Matrix4 transform = Matrix4::Translation(view_eye_) * view.ToMatrix() *
+                                  Matrix4::Translation(Vector3(right, -down, -forward)) *
+                                  Math::Quaternion::FromAxisAngle(Vector3::Forward, tilt * kDegToRad).ToMatrix() *
+                                  Matrix4::Translation(-it->second.center);
+        Renderer::DrawModel(renderer, it->second.model, transform);
     }
 
     Vector3 CoreRenderPosition() const {
@@ -823,6 +876,24 @@ private:
         core_mesh_ = renderer.CreateMesh(Renderer::MeshBuilder::Sphere(0.3f), "Core");
         exit_mesh_ = renderer.CreateMesh(Renderer::MeshBuilder::Box({3.0f, 0.02f, 3.0f}), "Exit");
         for (const MeshHandle mesh : {body_mesh_, head_mesh_, core_mesh_, exit_mesh_}) meshes_.push_back(mesh);
+
+        for (const WeaponDef* def : {&config_.weapons.rifle, &config_.weapons.shotgun, &config_.weapons.sniper,
+                                     &config_.weapons.pistol}) {
+            if (def->model.empty()) continue;
+            const String path = (std::filesystem::path(launch_.asset_dir) / def->model).string();
+            Renderer::ModelData data;
+            Renderer::ModelLoadOptions options;
+            options.scale = def->model_scale;
+            ViewModel view;
+            if (!Renderer::LoadModelData(path, data, options) || !Renderer::UploadModel(renderer, data, view.model)) {
+                DRX_LOG_WARNING("SHIFT: weapon model '{}' could not be loaded", path);
+                continue;
+            }
+            view.center = data.bounds.GetCenter();
+            const Vector3 size = data.bounds.max - data.bounds.min;
+            DRX_LOG_INFO("SHIFT: weapon model {} ({:.2f} x {:.2f} x {:.2f} m)", def->model, size.x, size.y, size.z);
+            view_models_[def->id] = std::move(view);
+        }
         graphics_ready_ = true;
     }
 
@@ -830,6 +901,8 @@ private:
         Renderer::SceneRenderer& renderer = GetRenderer();
         for (MeshHandle mesh : meshes_) renderer.DestroyMesh(mesh);
         meshes_.clear();
+        for (auto& [def, view] : view_models_) Renderer::ReleaseModel(renderer, view.model);
+        view_models_.clear();
         if (grid_texture_.IsValid()) renderer.DestroyTexture(grid_texture_);
         graphics_ready_ = false;
     }
@@ -890,6 +963,12 @@ private:
     String connect_target_;
 
     float32 zoom_ = 1.0f;
+    std::map<String, ViewModel> view_models_;   // by weapon id
+    Vector3 view_eye_;
+    bool aiming_ = false;
+    float32 view_speed_ = 0.0f;
+    float32 bob_phase_ = 0.0f;
+    float32 recoil_ = 0.0f;
     float32 look_yaw_ = 0.0f;
     float32 look_pitch_ = 0.0f;
     bool fire_latch_ = false;
@@ -943,6 +1022,10 @@ int main(int argc, char** argv) {
     std::error_code ec;
     DRX::Logger::Instance().SetOutputFile((exe_dir / "shift.log").string());   // for bug reports
     config.config_path = std::filesystem::exists(portable, ec) ? portable.string() : String(SHIFT_CONFIG_PATH);
-    Shift::ShiftApp app(std::move(config), Shift::ParseLaunch(argc, argv));
+    Shift::LaunchOptions launch = Shift::ParseLaunch(argc, argv);
+    // Portable builds ship Assets/Models next to the executable; development builds use the source folder
+    launch.asset_dir = std::filesystem::exists(exe_dir / "Assets" / "Models", ec) ? (exe_dir / "Assets").string()
+                                                                                  : String(SHIFT_ASSET_DIR);
+    Shift::ShiftApp app(std::move(config), std::move(launch));
     return app.Run(argc, argv);
 }

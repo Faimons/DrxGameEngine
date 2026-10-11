@@ -15,7 +15,8 @@ drx_set_warnings(ShiftCore)
 
 add_executable(ShiftGame Source/Game/main.cpp)
 target_link_libraries(ShiftGame PRIVATE ShiftCore)
-target_compile_definitions(ShiftGame PRIVATE SHIFT_CONFIG_PATH="${CMAKE_CURRENT_SOURCE_DIR}/shift.json")
+target_compile_definitions(ShiftGame PRIVATE SHIFT_CONFIG_PATH="${CMAKE_CURRENT_SOURCE_DIR}/shift.json"
+                                             SHIFT_ASSET_DIR="${CMAKE_CURRENT_SOURCE_DIR}/Assets")
 drx_set_warnings(ShiftGame)
 if(WIN32)
     # Game window without an extra console window
