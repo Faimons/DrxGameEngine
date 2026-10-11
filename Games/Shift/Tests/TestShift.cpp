@@ -4,6 +4,7 @@
 
 #include <gtest/gtest.h>
 
+#include "ShiftBot.h"
 #include "ShiftConfig.h"
 #include "ShiftLevel.h"
 #include "ShiftSchedule.h"
@@ -1131,4 +1132,71 @@ TEST(ShiftAssetsTest, CharacterClipsMatchTheRig) {
         EXPECT_NEAR(extent.y, size.y, size.y * 0.35f) << file << ": animated pose has the wrong size";
         EXPECT_GT(clips[0].duration, 0.1f);
     }
+}
+
+// ============================================================================
+// Bots
+// ============================================================================
+
+class ShiftBotTest : public ::testing::TestWithParam<const char*> {};
+
+// A bot alone against a target dummy finds the core through the shifting walls and wins rounds
+TEST_P(ShiftBotTest, BotDeliversTheCore) {
+    ShiftConfig config = LoadConfig();
+    ShiftWorld world;
+    ASSERT_TRUE(world.Initialize(config));
+    const Level level = BuildLevel(GetParam());
+    level.Apply(world);
+    world.AddPlayer(Team::A, true);
+    BotDirector bots;
+    bots.Build(world, level);
+    ASSERT_TRUE(bots.GetGrid().IsValid());
+    EXPECT_TRUE(bots.GetGrid().IsWalkable(world.GetCoreHome()));
+    EXPECT_TRUE(bots.GetGrid().IsWalkable(world.GetSpawn(Team::B).position));
+    const PlayerId bot = bots.AddBot(world, Team::B);
+    ASSERT_NE(bot, kInvalidPlayer);
+    world.StartMatch(777);
+
+    int pickups = 0, kills = 0;
+    const int ticks = static_cast<int>(240.0f / world.GetTickInterval());
+    int won_at = -1;
+    for (int i = 0; i < ticks && won_at < 0; ++i) {
+        bots.Update(world);
+        world.Step();
+        for (const WorldEvent& e : world.TakeEvents()) {
+            if (e.type == WorldEventType::CorePickup && e.source == bot) ++pickups;
+            if (e.type == WorldEventType::Kill && e.source == bot) ++kills;
+        }
+        if (world.GetMatch().score[static_cast<int>(Team::B)] > 0) won_at = i;
+    }
+    std::printf("[ %-7s] bot: %d pickups, %d kills, round won after %.1f s\n", GetParam(), pickups, kills,
+                won_at >= 0 ? static_cast<float32>(won_at) * world.GetTickInterval() : -1.0f);
+    EXPECT_GE(pickups, 1);
+    EXPECT_GE(won_at, 0) << "bot did not deliver the core in 4 minutes";
+}
+
+INSTANTIATE_TEST_SUITE_P(Maps, ShiftBotTest, ::testing::Values("arena", "fabrik"));
+
+// The bot sees and shoots an enemy standing in the open
+TEST(ShiftBotFight, BotKillsAVisibleEnemy) {
+    ShiftConfig config = LoadConfig();
+    ShiftWorld world;
+    ASSERT_TRUE(world.Initialize(config));
+    const Level level = BuildLevel("testroom");
+    level.Apply(world);
+    const PlayerId target = world.AddPlayer(Team::A, true);
+    BotDirector bots;
+    bots.Build(world, level);
+    const PlayerId bot = bots.AddBot(world, Team::B);
+    world.StartMatch(99);
+    int kills = 0;
+    const int ticks = static_cast<int>(40.0f / world.GetTickInterval());
+    for (int i = 0; i < ticks && kills == 0; ++i) {
+        bots.Update(world);
+        world.Step();
+        for (const WorldEvent& e : world.TakeEvents()) {
+            if (e.type == WorldEventType::Kill && e.source == bot && e.target == target) ++kills;
+        }
+    }
+    EXPECT_GE(kills, 1);
 }

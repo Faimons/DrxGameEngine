@@ -150,6 +150,12 @@ void ShiftConfig::Load(const Config& config) {
     r.Number("shifts.crush_gap", shifts.crush_gap, 0.1f, 5.0f);
     r.Integer("shifts.all_open_max_per", shifts.all_open_max_per, 2, 100);
 
+    r.Number("bot.reaction_time", bot.reaction_time, 0.0f, 5.0f);
+    r.Number("bot.aim_error", bot.aim_error, 0.0f, 45.0f);
+    r.Number("bot.turn_speed", bot.turn_speed, 10.0f, 3600.0f);
+    r.Number("bot.view_range", bot.view_range, 1.0f, 500.0f);
+    r.Integer("bot.loadout", bot.loadout, 0, 2);
+
     r.Integer("drones.count", drones.count, 0, 32);
     r.Number("drones.health", drones.health, 1.0f, 10000.0f);
     r.Number("drones.damage", drones.damage, 0.0f, 1000.0f);

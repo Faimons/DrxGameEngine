@@ -104,6 +104,14 @@ struct DroneSettings {
     float32 respawn_time = 30.0f;
 };
 
+struct BotSettings {
+    float32 reaction_time = 0.45f;      // seconds an enemy must be seen before the first shot
+    float32 aim_error = 3.0f;           // degrees, wandering aim offset
+    float32 turn_speed = 300.0f;        // degrees per second
+    float32 view_range = 45.0f;         // metres
+    int32 loadout = 0;                  // 0 rifle, 1 shotgun, 2 sniper
+};
+
 struct NetSettings {
     int32 tick_rate = 30;
     int32 port = 27015;
@@ -123,6 +131,7 @@ struct ShiftConfig {
     RoundSettings round;
     WallShiftSettings shifts;
     DroneSettings drones;
+    BotSettings bot;
     NetSettings net;
 
     ShiftConfig();

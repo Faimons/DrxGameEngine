@@ -2,7 +2,7 @@
  * SHIFT - Game client
  *
  * Modes (menu at start, or command line):
- *   1 / --offline            arena (or test room) against a target dummy
+ *   1 / --offline            against a computer opponent
  *   2 / --host               host a duel: you play on the server, a friend joins
  *   3 / --connect [ip:port]  join a host (default: net.server_address from shift.json)
  *
@@ -10,6 +10,7 @@
  *           Esc releases the mouse (Esc again quits), click to capture, F11 fullscreen, F12 screenshot
  */
 
+#include "../Core/ShiftBot.h"
 #include "../Core/ShiftConfig.h"
 #include "../Core/ShiftLevel.h"
 #include "../Core/ShiftNet.h"
@@ -199,6 +200,7 @@ protected:
             case Mode::Host: {
                 if (mode_ == Mode::Host) server_.Receive(now);
                 world_.SetInput(local_id_, BuildInput());
+                bots_.Update(world_);
                 RememberPositions();
                 world_.Step();
                 const Array<WorldEvent> events = world_.TakeEvents();
@@ -322,13 +324,17 @@ private:
     ShiftWorld& SimWorld() { return mode_ == Mode::Client ? client_.GetWorld() : world_; }
     const ShiftWorld& SimWorld() const { return mode_ == Mode::Client ? client_.GetWorld() : world_; }
 
-    bool StartWorld(bool with_dummy) {
+    bool StartWorld(bool with_bot) {
         if (!world_.Initialize(config_, true)) return false;
         level_ = BuildLevel(config_.round.map);
         level_.Apply(world_);
         local_id_ = world_.AddPlayer(Team::A);
-        if (with_dummy) dummy_id_ = world_.AddPlayer(Team::B, true);
         if (local_id_ == kInvalidPlayer) return false;
+        bots_.Clear();
+        if (with_bot) {
+            bots_.Build(world_, level_);
+            if (bots_.AddBot(world_, Team::B) == kInvalidPlayer) return false;
+        }
         world_.StartMatch(NewSeed());
         world_.TakeEvents();
         CreateGraphics();
@@ -817,7 +823,7 @@ private:
             ui.DrawText(text, x, y, color, size);
             y += size + 14.0f;
         };
-        line("1   Offline spielen (Arena mit Puppe)", {1, 1, 1, 1}, 32.0f);
+        line("1   Gegen Bot spielen", {1, 1, 1, 1}, 32.0f);
         line(fmt::format("2   Duell hosten (Port {})", config_.net.port), {1, 1, 1, 1}, 32.0f);
         line(fmt::format("3   Beitreten ({})", config_.net.server_address), {1, 1, 1, 1}, 32.0f);
         line(fmt::format("M   Karte: {}", config_.round.map), {1.0f, 0.85f, 0.4f, 1.0f}, 32.0f);
@@ -1141,7 +1147,7 @@ private:
     ShiftClient client_;
     Level level_;
     PlayerId local_id_ = kInvalidPlayer;
-    PlayerId dummy_id_ = kInvalidPlayer;
+    BotDirector bots_;
     std::map<PlayerId, Vector3> previous_feet_;
     String status_error_;
     String connect_target_;

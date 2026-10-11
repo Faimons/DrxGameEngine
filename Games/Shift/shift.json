@@ -77,6 +77,14 @@
         "map": "arena"
     },
 
+    "bot": {
+        "reaction_time": 0.45,
+        "aim_error": 3.0,
+        "turn_speed": 300,
+        "view_range": 45,
+        "loadout": 0
+    },
+
     "shifts": {
         "interval": 30,
         "warning_time": 5,

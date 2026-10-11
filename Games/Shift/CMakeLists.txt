@@ -2,6 +2,7 @@
 
 # Simulation shared by server and client
 add_library(ShiftCore STATIC
+    Source/Core/ShiftBot.cpp
     Source/Core/ShiftConfig.cpp
     Source/Core/ShiftLevel.cpp
     Source/Core/ShiftNet.cpp
