@@ -1211,6 +1211,9 @@ TEST_P(ShiftMapFileTest, JsonRoundTripKeepsEverything) {
     Level level;
     ASSERT_TRUE(BuildBuiltinLevel(GetParam(), level));
     level.props.push_back({"Models/Props/kiste.glb", Vector3(1.5f, 0.0f, -2.0f), 90.0f, 0.5f});
+    level.boxes[0].color = DRX::Math::Vector4(0.2f, 0.4f, 0.6f, 1.0f);
+    level.boxes[0].glow = 1.5f;
+    if (!level.segments.empty()) level.segments[0].color = DRX::Math::Vector4(1.0f, 0.0f, 0.0f, 1.0f);
     Level loaded;
     String error;
     ASSERT_TRUE(LevelFromJson(LevelToJson(level), loaded, &error)) << error;
@@ -1238,6 +1241,12 @@ TEST_P(ShiftMapFileTest, JsonRoundTripKeepsEverything) {
         EXPECT_TRUE(near(loaded.exits[t].size, level.exits[t].size));
     }
     EXPECT_EQ(loaded.props[0].model, "Models/Props/kiste.glb");
+    EXPECT_NEAR(loaded.boxes[0].color.y, 0.4f, 1.0e-5f);
+    EXPECT_NEAR(loaded.boxes[0].glow, 1.5f, 1.0e-5f);
+    EXPECT_FLOAT_EQ(loaded.boxes[1].color.w, 0.0f);
+    if (!level.segments.empty()) {
+        EXPECT_FLOAT_EQ(loaded.segments[0].color.x, 1.0f);
+    }
     EXPECT_NEAR(loaded.props[0].scale, 0.5f, 1.0e-6f);
 }
 

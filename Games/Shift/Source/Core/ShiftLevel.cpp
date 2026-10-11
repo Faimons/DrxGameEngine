@@ -7,10 +7,16 @@
 #include "Core/Public/Log.h"
 #include "Core/Public/Platform.h"
 
+// Own namespace: assimp ships another rapidjson build, identical template names would clash at link time
+#define RAPIDJSON_NAMESPACE shift_rapidjson
+#define RAPIDJSON_NAMESPACE_BEGIN namespace shift_rapidjson {
+#define RAPIDJSON_NAMESPACE_END }
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
 #include <rapidjson/prettywriter.h>
 #include <rapidjson/stringbuffer.h>
+
+namespace rapidjson = shift_rapidjson;
 
 #include <algorithm>
 #include <filesystem>
@@ -24,6 +30,17 @@ namespace {
 
 constexpr float32 kHeight = 4.0f;
 constexpr float32 kWall = 0.5f;
+
+// Flat coloured plate under a start (look only)
+void AddSpawnMarker(Level& level, const Math::Vector3& center, Surface surface) {
+    LevelBox marker;
+    marker.center = center;
+    marker.size = {1.5f, 0.02f, 1.5f};
+    marker.surface = surface;
+    marker.collision = false;
+    marker.casts_shadow = false;
+    level.boxes.push_back(marker);
+}
 
 MovingSegmentDef SlidingSegment(const String& name, SegmentGroup group, const Math::Vector3& center,
                                 const Math::Vector3& size, const Math::Vector3& move) {
@@ -152,8 +169,8 @@ Level BuildTestRoom() {
                                             {kSegmentWidth, kHeight, kSegmentDepth}, {kSegmentWidth, 0.0f, 0.0f}));
 
     // Spawn markers (no collision)
-    level.boxes.push_back({{0, 0.01f, 4.5f}, {1.5f, 0.02f, 1.5f}, Surface::SpawnA, false, false});
-    level.boxes.push_back({{0, 0.01f, -4.5f}, {1.5f, 0.02f, 1.5f}, Surface::SpawnB, false, false});
+    AddSpawnMarker(level, {0.0f, 0.01f, 4.5f}, Surface::SpawnA);
+    AddSpawnMarker(level, {0.0f, 0.01f, -4.5f}, Surface::SpawnB);
 
     level.spawns[0] = {Vector3(0, 0, 4.5f), 0.0f};      // looks north (-Z)
     level.spawns[1] = {Vector3(0, 0, -4.5f), 180.0f};   // looks south
@@ -308,8 +325,8 @@ Level BuildArena() {
     }
 
     // Spawn markers and exit zones (3 x 3 m at the far end of each start room)
-    level.boxes.push_back({{-30.0f, 0.01f, 0.0f}, {1.5f, 0.02f, 1.5f}, Surface::SpawnA, false, false});
-    level.boxes.push_back({{30.0f, 0.01f, 0.0f}, {1.5f, 0.02f, 1.5f}, Surface::SpawnB, false, false});
+    AddSpawnMarker(level, {-30.0f, 0.01f, 0.0f}, Surface::SpawnA);
+    AddSpawnMarker(level, {30.0f, 0.01f, 0.0f}, Surface::SpawnB);
     level.spawns[0] = {Vector3(-30.0f, 0.0f, 0.0f), 90.0f};    // looks east
     level.spawns[1] = {Vector3(30.0f, 0.0f, 0.0f), 270.0f};    // looks west
     level.exits[0] = {Vector3(-34.0f, 1.0f, 0.0f), Vector3(3.0f, 2.0f, 3.0f)};
@@ -440,8 +457,8 @@ Level BuildFactory() {
     }
 
     // Start halls west and east of the middle row; exits at their outer walls; core in the middle
-    level.boxes.push_back({{-26.0f, 0.01f, 0.0f}, {1.5f, 0.02f, 1.5f}, Surface::SpawnA, false, false});
-    level.boxes.push_back({{26.0f, 0.01f, 0.0f}, {1.5f, 0.02f, 1.5f}, Surface::SpawnB, false, false});
+    AddSpawnMarker(level, {-26.0f, 0.01f, 0.0f}, Surface::SpawnA);
+    AddSpawnMarker(level, {26.0f, 0.01f, 0.0f}, Surface::SpawnB);
     level.spawns[0] = {Vector3(-26.0f, 0.0f, 0.0f), 90.0f};
     level.spawns[1] = {Vector3(26.0f, 0.0f, 0.0f), 270.0f};
     level.exits[0] = {Vector3(-32.5f, 1.0f, 0.0f), Vector3(3.0f, 2.0f, 3.0f)};
@@ -640,6 +657,14 @@ void WriteVector(JsonWriter& w, const char* key, const Math::Vector3& v) {
     w.SetFormatOptions(rapidjson::kFormatDefault);
 }
 
+void WriteLook(JsonWriter& w, const Math::Vector4& color, float32 glow) {
+    if (color.w > 0.0f) WriteVector(w, "color", Math::Vector3(color.x, color.y, color.z));
+    if (glow > 0.0f) {
+        w.Key("glow");
+        w.Double(static_cast<double>(glow));
+    }
+}
+
 bool ReadVector(const rapidjson::Value& object, const char* key, Math::Vector3& out) {
     const auto it = object.FindMember(key);
     if (it == object.MemberEnd() || !it->value.IsArray() || it->value.Size() != 3) return false;
@@ -663,6 +688,14 @@ bool ReadBool(const rapidjson::Value& object, const char* key, bool fallback) {
 String ReadString(const rapidjson::Value& object, const char* key, const String& fallback) {
     const auto it = object.FindMember(key);
     return it != object.MemberEnd() && it->value.IsString() ? String(it->value.GetString()) : fallback;
+}
+
+void ReadLook(const rapidjson::Value& object, Math::Vector4& color, float32& glow) {
+    Math::Vector3 rgb;
+    if (ReadVector(object, "color", rgb)) {
+        color = Math::Vector4(std::clamp(rgb.x, 0.0f, 1.0f), std::clamp(rgb.y, 0.0f, 1.0f), std::clamp(rgb.z, 0.0f, 1.0f), 1.0f);
+    }
+    glow = std::clamp(ReadFloat(object, "glow", 0.0f), 0.0f, 20.0f);
 }
 
 const rapidjson::Value* ReadArray(const rapidjson::Value& object, const char* key) {
@@ -755,6 +788,7 @@ String LevelToJson(const Level& level) {
             w.Key("shadow");
             w.Bool(false);
         }
+        WriteLook(w, box.color, box.glow);
         w.EndObject();
     }
     w.EndArray();
@@ -773,6 +807,7 @@ String LevelToJson(const Level& level) {
         w.Key("rotate");
         w.Double(static_cast<double>(segment.rotate));
         WriteVector(w, "pivot", segment.pivot);
+        WriteLook(w, segment.color, segment.glow);
         w.EndObject();
     }
     w.EndArray();
@@ -846,6 +881,7 @@ bool LevelFromJson(const String& json, Level& out, String* error) {
             }
             box.collision = ReadBool(b, "collision", true);
             box.casts_shadow = ReadBool(b, "shadow", box.surface != Surface::Ceiling);
+            ReadLook(b, box.color, box.glow);
             level.boxes.push_back(box);
         }
     }
@@ -864,6 +900,7 @@ bool LevelFromJson(const String& json, Level& out, String* error) {
             ReadVector(s, "move", def.move);
             def.rotate = ReadFloat(s, "rotate", 0.0f);
             ReadVector(s, "pivot", def.pivot);
+            ReadLook(s, def.color, def.glow);
             level.segments.push_back(def);
         }
     }

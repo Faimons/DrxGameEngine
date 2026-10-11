@@ -30,6 +30,8 @@ struct LevelBox {
     Surface surface = Surface::Wall;
     bool collision = true;
     bool casts_shadow = true;
+    Math::Vector4 color;     // w > 0 overrides the surface colour
+    float32 glow = 0.0f;     // emissive strength
 };
 
 // Decoration model (render only), path below the Assets folder

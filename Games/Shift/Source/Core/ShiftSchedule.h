@@ -23,6 +23,8 @@
 #include "ShiftConfig.h"
 #include "ShiftTypes.h"
 
+#include "Core/Public/Math/Vector4.h"
+
 #include "Core/Public/Math/Quaternion.h"
 
 namespace Shift {
@@ -57,6 +59,10 @@ enum class ShiftMode : uint8 {
 };
 
 const char* PatternName(ShiftPattern pattern);
+// Groups a pattern moves (AllOpen: groups it opens)
+GroupMask PatternGroups(ShiftPattern pattern);
+// Wall state right after `pattern` was applied to the round start state
+GroupMask PatternPreviewState(ShiftPattern pattern);
 
 struct SegmentPose {
     Math::Vector3 center;
@@ -73,6 +79,8 @@ struct MovingSegmentDef {
     Math::Vector3 move;            // translation to state 1
     float32 rotate = 0.0f;         // or rotation to state 1 (degrees around pivot)
     Math::Vector3 pivot;
+    Math::Vector4 color;           // look only: w > 0 overrides the default colour
+    float32 glow = 0.0f;           // look only: emissive strength
 
     SegmentPose PoseAt(float32 amount) const;   // 0 = state 0, 1 = state 1
     float32 TravelDistance() const;             // path length of the farthest point

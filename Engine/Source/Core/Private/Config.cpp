@@ -5,10 +5,16 @@
 #include "Core/Public/Config.h"
 #include "Core/Public/Log.h"
 
+// Own namespace: assimp ships another rapidjson build, identical template names would clash at link time
+#define RAPIDJSON_NAMESPACE drx_rapidjson
+#define RAPIDJSON_NAMESPACE_BEGIN namespace drx_rapidjson {
+#define RAPIDJSON_NAMESPACE_END }
 #include <rapidjson/document.h>
 #include <rapidjson/error/en.h>
 #include <rapidjson/prettywriter.h>
 #include <rapidjson/stringbuffer.h>
+
+namespace rapidjson = drx_rapidjson;
 
 #include <algorithm>
 #include <cmath>

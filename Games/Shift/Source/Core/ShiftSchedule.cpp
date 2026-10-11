@@ -18,6 +18,8 @@ constexpr GroupMask kCoreGroups = GroupBit(SegmentGroup::CoreDoorsNS) | GroupBit
 constexpr GroupMask kAllOpenGroups =
     kGateGroups | kCoreGroups | GroupBit(SegmentGroup::NorthPanels);
 
+} // namespace
+
 GroupMask PatternGroups(ShiftPattern pattern) {
     switch (pattern) {
         case ShiftPattern::GateSwap: return kGateGroups;
@@ -31,7 +33,11 @@ GroupMask PatternGroups(ShiftPattern pattern) {
     return 0;
 }
 
-} // namespace
+GroupMask PatternPreviewState(ShiftPattern pattern) {
+    const GroupMask base = ShiftPlan::InitialState();
+    if (pattern == ShiftPattern::AllOpen) return base | PatternGroups(pattern);
+    return base ^ PatternGroups(pattern);
+}
 
 uint32 HashU32(uint32 a, uint32 b, uint32 c) {
     uint32 h = a * 0x9E3779B1u ^ (b + 0x7F4A7C15u) * 0x85EBCA77u ^ (c + 0x165667B1u) * 0xC2B2AE3Du;
