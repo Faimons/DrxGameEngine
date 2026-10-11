@@ -175,6 +175,12 @@ private:
     bool IsDraggable(const Selection& selection) const;
     float32 SnapCorner(float32 center, float32 size) const;
     float32 SnapValue(float32 value) const;
+    // Moves `position` (centre of `s`) so its faces touch / align with nearby blocks and walls
+    Math::Vector3 SnapToNeighbours(const Selection& s, const Math::Vector3& position) const;
+    // Doors: cut an opening into wall block `index` around `along` (coordinate on the wall axis)
+    bool CutOpening(size_t index, float32 along, float32 width);
+    void InsertDoor(size_t wall_index, int32 type);   // 0 sinking, 1 sliding, 2 open passage
+    void FitSegmentIntoWall(size_t segment_index);
     Layer BoxLayer(const LevelBox& box) const;
     bool BoxVisible(const LevelBox& box) const;
 
@@ -210,6 +216,9 @@ private:
     Selection hover_;
     float32 grid_ = 0.5f;
     bool snap_ = true;
+    bool snap_edges_ = true;
+    float32 door_width_ = 3.0f;
+    Math::Vector3 last_hit_point_;
     bool labels_ = true;
     bool group_labels_ = false;
     bool show_grid_ = true;

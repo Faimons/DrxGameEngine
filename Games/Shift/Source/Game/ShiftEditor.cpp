@@ -774,6 +774,175 @@ void MapEditor::FocusSelection() {
 }
 
 // ============================================================================
+// Snapping and doors
+// ============================================================================
+
+Math::Vector3 MapEditor::SnapToNeighbours(const Selection& s, const Vector3& position) const {
+    const Vector3 size = SizeOf(s);
+    if (size.x <= 0.0f || size.z <= 0.0f) return position;
+    constexpr float32 kRange = 0.35f;
+    const Vector3 half = size * 0.5f;
+    float32 best_x = kRange, best_z = kRange;
+    float32 dx = 0.0f, dz = 0.0f;
+    const auto consider = [&](const Vector3& center, const Vector3& other_size) {
+        const Vector3 o = other_size * 0.5f;
+        // Only neighbours that overlap in height
+        if (center.y + o.y < position.y - half.y + 0.01f || center.y - o.y > position.y + half.y - 0.01f) return;
+        const bool overlap_z = position.z + half.z > center.z - o.z - kRange && position.z - half.z < center.z + o.z + kRange;
+        const bool overlap_x = position.x + half.x > center.x - o.x - kRange && position.x - half.x < center.x + o.x + kRange;
+        if (overlap_z) {
+            // touch left/right, align faces, align centre lines
+            const float32 targets[] = {center.x - o.x - half.x, center.x + o.x + half.x, center.x - o.x + half.x, center.x + o.x - half.x, center.x};
+            for (const float32 t : targets) {
+                if (std::abs(t - position.x) < best_x) {
+                    best_x = std::abs(t - position.x);
+                    dx = t - position.x;
+                }
+            }
+        }
+        if (overlap_x) {
+            const float32 targets[] = {center.z - o.z - half.z, center.z + o.z + half.z, center.z - o.z + half.z, center.z + o.z - half.z, center.z};
+            for (const float32 t : targets) {
+                if (std::abs(t - position.z) < best_z) {
+                    best_z = std::abs(t - position.z);
+                    dz = t - position.z;
+                }
+            }
+        }
+    };
+    for (size_t i = 0; i < level_.boxes.size(); ++i) {
+        const LevelBox& box = level_.boxes[i];
+        if (IsSelected({Kind::Box, static_cast<int32>(i)}) || !BoxVisible(box) || box.size.x * box.size.z > 400.0f) continue;
+        consider(box.center, box.size);
+    }
+    for (size_t i = 0; i < level_.segments.size(); ++i) {
+        if (IsSelected({Kind::Segment, static_cast<int32>(i)})) continue;
+        const MovingSegmentDef& def = level_.segments[i];
+        if (std::abs(def.rotate) > 0.01f) continue;
+        consider(def.center, def.size);
+    }
+    return Vector3(position.x + dx, position.y, position.z + dz);
+}
+
+bool MapEditor::CutOpening(size_t index, float32 along, float32 width) {
+    const LevelBox wall = level_.boxes[index];
+    const bool along_x = wall.size.x >= wall.size.z;
+    const float32 center = along_x ? wall.center.x : wall.center.z;
+    const float32 length = along_x ? wall.size.x : wall.size.z;
+    const float32 lo = center - length * 0.5f;
+    const float32 hi = center + length * 0.5f;
+    if (length < width + 0.1f) return false;
+    const float32 mid = std::clamp(along, lo + width * 0.5f, hi - width * 0.5f);
+    const auto piece = [&](float32 a, float32 b) {
+        LevelBox part = wall;
+        if (along_x) {
+            part.size.x = b - a;
+            part.center.x = (a + b) * 0.5f;
+        } else {
+            part.size.z = b - a;
+            part.center.z = (a + b) * 0.5f;
+        }
+        return part;
+    };
+    level_.boxes.erase(level_.boxes.begin() + static_cast<std::ptrdiff_t>(index));
+    if (mid - width * 0.5f - lo > 0.05f) level_.boxes.push_back(piece(lo, mid - width * 0.5f));
+    if (hi - (mid + width * 0.5f) > 0.05f) level_.boxes.push_back(piece(mid + width * 0.5f, hi));
+    last_hit_point_ = along_x ? Vector3(mid, wall.center.y, wall.center.z) : Vector3(wall.center.x, wall.center.y, mid);
+    return true;
+}
+
+void MapEditor::InsertDoor(size_t wall_index, int32 type) {
+    const LevelBox wall = level_.boxes[wall_index];
+    const bool along_x = wall.size.x >= wall.size.z;
+    const float32 width = std::max(1.0f, door_width_);
+    // Opening where the wall was clicked, on the grid
+    const float32 along = SnapValue(along_x ? last_hit_point_.x : last_hit_point_.z);
+    PushUndo(type == 2 ? "Durchgang eingebaut" : "Tuer eingebaut");
+    if (!CutOpening(wall_index, along, width)) {
+        undo_.pop_back();
+        SetStatus(fmt::format("Wand zu kurz fuer eine {:.1f} m breite Oeffnung", width), true);
+        return;
+    }
+    selection_.clear();
+    if (type == 2) {
+        SetStatus("Durchgang eingebaut");
+        MarkChanged();
+        return;
+    }
+    const float32 thickness = along_x ? wall.size.z : wall.size.x;
+    MovingSegmentDef def;
+    def.name = fmt::format("{} {}", type == 0 ? "Senktuer" : "Schiebetor", level_.segments.size() + 1);
+    def.group = static_cast<SegmentGroup>(new_group_);
+    def.center = last_hit_point_;
+    def.size = along_x ? Vector3(width, wall.size.y, thickness) : Vector3(thickness, wall.size.y, width);
+    def.pivot = def.center;
+    def.color = wall.color;
+    def.move = type == 0 ? Vector3(0.0f, -(wall.size.y + 0.1f), 0.0f)          // sinks into the floor
+                         : (along_x ? Vector3(width, 0.0f, 0.0f) : Vector3(0.0f, 0.0f, width));   // slides into the wall
+    level_.segments.push_back(def);
+    selection_.push_back({Kind::Segment, static_cast<int32>(level_.segments.size()) - 1});
+    SetStatus(fmt::format("{} eingebaut (Gruppe {})", type == 0 ? "Senktuer" : "Schiebetor", SegmentGroupName(def.group)));
+    MarkChanged();
+}
+
+void MapEditor::FitSegmentIntoWall(size_t segment_index) {
+    MovingSegmentDef def = level_.segments[segment_index];
+    const bool seg_along_x = def.size.x >= def.size.z;
+    // Nearest wall block with the same direction
+    int32 best = -1;
+    float32 best_distance = 1.5f;
+    for (size_t i = 0; i < level_.boxes.size(); ++i) {
+        const LevelBox& box = level_.boxes[i];
+        if (box.surface != Surface::Wall || (box.size.x >= box.size.z) != seg_along_x) continue;
+        const float32 across = seg_along_x ? std::abs(box.center.z - def.center.z) : std::abs(box.center.x - def.center.x);
+        const float32 lo = (seg_along_x ? box.center.x - box.size.x * 0.5f : box.center.z - box.size.z * 0.5f) - 0.5f;
+        const float32 hi = (seg_along_x ? box.center.x + box.size.x * 0.5f : box.center.z + box.size.z * 0.5f) + 0.5f;
+        const float32 along = seg_along_x ? def.center.x : def.center.z;
+        if (along < lo || along > hi) continue;
+        if (across < best_distance) {
+            best_distance = across;
+            best = static_cast<int32>(i);
+        }
+    }
+    if (best < 0) {
+        SetStatus("Keine passende Wand in der Naehe (max. 1,5 m)", true);
+        return;
+    }
+    PushUndo("In Wand eingesetzt");
+    const LevelBox wall = level_.boxes[static_cast<size_t>(best)];
+    const Vector3 old_center = def.center;
+    if (seg_along_x) {
+        def.center.z = wall.center.z;
+        def.size.z = wall.size.z;
+    } else {
+        def.center.x = wall.center.x;
+        def.size.x = wall.size.x;
+    }
+    def.size.y = wall.size.y;
+    def.center.y = wall.center.y;
+    def.pivot = def.pivot + (def.center - old_center);
+    level_.segments[segment_index] = def;
+    // Cut the wall where the door is (if they overlap)
+    const float32 width = seg_along_x ? def.size.x : def.size.z;
+    const float32 wall_lo = seg_along_x ? wall.center.x - wall.size.x * 0.5f : wall.center.z - wall.size.z * 0.5f;
+    const float32 wall_hi = seg_along_x ? wall.center.x + wall.size.x * 0.5f : wall.center.z + wall.size.z * 0.5f;
+    const float32 along = seg_along_x ? def.center.x : def.center.z;
+    if (along + width * 0.5f > wall_lo + 0.01f && along - width * 0.5f < wall_hi - 0.01f && wall_hi - wall_lo > width + 0.1f) {
+        CutOpening(static_cast<size_t>(best), along, width);
+        // CutOpening clamps the opening into the wall: move the door onto it
+        const float32 opened = seg_along_x ? last_hit_point_.x : last_hit_point_.z;
+        const float32 shift_by = opened - along;
+        Vector3 shift = seg_along_x ? Vector3(shift_by, 0.0f, 0.0f) : Vector3(0.0f, 0.0f, shift_by);
+        level_.segments[segment_index].center = level_.segments[segment_index].center + shift;
+        level_.segments[segment_index].pivot = level_.segments[segment_index].pivot + shift;
+    }
+    selection_.clear();
+    selection_.push_back({Kind::Segment, static_cast<int32>(segment_index)});
+    SetStatus("In die Wand eingesetzt: gleiche Dicke und Hoehe, Wand aufgeschnitten");
+    MarkChanged();
+}
+
+// ============================================================================
 // Camera, picking and viewport input
 // ============================================================================
 
@@ -954,12 +1123,13 @@ void MapEditor::Update(Input::InputSystem& input, float32 dt, float32 screen_wid
         SetStatus(fmt::format("Raster {}", kGridNames[next]));
     }
     Vector3 nudge = Vector3::Zero;
-    if (input.IsKeyPressed(KeyCode::Left)) nudge.x -= grid_;
-    if (input.IsKeyPressed(KeyCode::Right)) nudge.x += grid_;
-    if (input.IsKeyPressed(KeyCode::Up)) nudge.z -= grid_;
-    if (input.IsKeyPressed(KeyCode::Down)) nudge.z += grid_;
-    if (input.IsKeyPressed(KeyCode::PageUp)) nudge.y += grid_;
-    if (input.IsKeyPressed(KeyCode::PageDown)) nudge.y -= grid_;
+    const float32 step = shift ? 0.05f : grid_;   // Shift: 5 cm
+    if (input.IsKeyPressed(KeyCode::Left)) nudge.x -= step;
+    if (input.IsKeyPressed(KeyCode::Right)) nudge.x += step;
+    if (input.IsKeyPressed(KeyCode::Up)) nudge.z -= step;
+    if (input.IsKeyPressed(KeyCode::Down)) nudge.z += step;
+    if (input.IsKeyPressed(KeyCode::PageUp)) nudge.y += step;
+    if (input.IsKeyPressed(KeyCode::PageDown)) nudge.y -= step;
     if (nudge.LengthSquared() > 0.0f && !selection_.empty()) {
         PushUndo("Verschoben");
         MoveSelection(nudge);
@@ -976,6 +1146,7 @@ void MapEditor::Update(Input::InputSystem& input, float32 dt, float32 screen_wid
     if (input.IsMouseButtonPressed(Input::MouseButton::Left) && !over_ui) {
         press_mouse_ = mouse;
         if (hit_something) {
+            last_hit_point_ = ray.origin + ray.direction * hit.distance;
             const bool already = IsSelected(hit.selection);
             if (shift) Select(hit.selection, true);
             else if (!already) Select(hit.selection, false);
@@ -1022,6 +1193,7 @@ void MapEditor::Update(Input::InputSystem& input, float32 dt, float32 screen_wid
                     }
                 }
             }
+            if (snap_edges_ && !drag_vertical_) wanted = SnapToNeighbours(Primary(), wanted);
             const Vector3 delta = wanted - current;
             if (delta.LengthSquared() > 1.0e-8f) {
                 if (!drag_moved_) PushUndo(selection_.size() > 1 ? "Gruppe verschoben" : "Verschoben");
@@ -1333,6 +1505,8 @@ bool MapEditor::Number(Layout& l, const String& label, float32& value, float32 s
     l.ui->DrawText(label, l.x, l.y + 3.0f, kText, kFont - 1.0f);
 
     const float32 before = value;
+    // Shift: fine steps of 5 cm (or a tenth of the step)
+    if (l.input->IsKeyDown(Input::KeyCode::LeftShift) || l.input->IsKeyDown(Input::KeyCode::RightShift)) step = std::min(step, 0.05f);
     if (Button(l, "-", l.x + label_w, bw)) value -= step;
     if (Button(l, "+", field_x + field_w + 2.0f, bw)) value += step;
     const bool hovered = Hovered(l, field_x, l.y, field_w, h);
@@ -1385,7 +1559,6 @@ bool MapEditor::Number(Layout& l, const String& label, float32& value, float32 s
         }
     }
     value = std::clamp(value, min_value, max_value);
-    if (std::abs(value - before) > 1.0e-6f) value = std::clamp(std::round(value / (step * 0.5f)) * step * 0.5f, min_value, max_value);
 
     const bool editing = text_focus_ && focus_field_ == id;
     l.ui->DrawRect({field_x, l.y, field_w, h}, editing ? kButtonHighlight : active_widget_ == id ? kButtonHighlight : hovered ? kButtonHover : kFieldColor);
@@ -1819,11 +1992,28 @@ void MapEditor::DrawPropertiesPanel(Layout& l) {
                 }
                 changed = true;
             }
+            if (box.surface == Surface::Wall && selection_.size() == 1) {
+                Header(l, "Tuer / Durchgang einbauen");
+                Label(l, "Oeffnung entsteht dort, wo du die Wand angeklickt hast.", kDim);
+                Number(l, "Breite", door_width_, 0.5f, 1.0f, 20.0f);
+                Array<String> groups;
+                for (uint32 g = 0; g < static_cast<uint32>(SegmentGroup::Count); ++g) groups.push_back(SegmentGroupName(static_cast<SegmentGroup>(g)));
+                Choice(l, "Gruppe", new_group_, groups);
+                const int32 door = ButtonRow(l, {"Senktuer", "Schiebetor", "Durchgang"});
+                if (door >= 0) {
+                    InsertDoor(i, door);
+                    return;
+                }
+            }
             break;
         }
         case Kind::Segment: {
             MovingSegmentDef& def = level_.segments[i];
             Header(l, "Bewegung");
+            if (selection_.size() == 1 && FullButton(l, "In Wand einsetzen (Dicke angleichen, Wand oeffnen)")) {
+                FitSegmentIntoWall(i);
+                return;
+            }
             TextField(l, "Name", def.name);
             int32 group = static_cast<int32>(def.group);
             Array<String> groups;
@@ -1980,6 +2170,7 @@ void MapEditor::DrawViewPanel(Layout& l) {
     }
     if (Choice(l, "Raster", grid_index, kGridNames)) grid_ = kGridSizes[grid_index];
     Toggle(l, "Am Raster einrasten", snap_);
+    Toggle(l, "An Kanten fangen (Waende, Bloecke)", snap_edges_);
     Toggle(l, "Bodenraster zeigen", show_grid_);
     Toggle(l, "Beschriftungen", labels_);
     Toggle(l, "Wandgruppen beschriften", group_labels_);
