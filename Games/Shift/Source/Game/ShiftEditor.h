@@ -26,6 +26,7 @@
 
 #include <initializer_list>
 #include <map>
+#include <set>
 #include <tuple>
 
 namespace Shift {
@@ -280,6 +281,7 @@ private:
     Array<String> map_names_;
     int32 map_index_ = 0;
     Array<String> prop_files_;
+    std::set<String> open_prop_groups_;   // expanded folders in the Deko list
     float32 prop_scale_ = 1.0f;
 
     // GPU resources owned by the editor

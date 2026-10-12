@@ -72,3 +72,6 @@ Games/Shift/Assets/Audio/
 Games/Shift/Assets/UI/
 **/awp.glb
 **/first_person_ak47_animation.glb
+
+# Node tools
+node_modules/

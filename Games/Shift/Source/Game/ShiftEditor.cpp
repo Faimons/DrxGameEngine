@@ -150,6 +150,12 @@ bool SameColor(const Vector4& a, const Vector4& b) {
     return std::abs(a.x - b.x) + std::abs(a.y - b.y) + std::abs(a.z - b.z) < 0.02f;
 }
 
+// Folder of a decoration model below Models/Props ("Rohre/Kupfer"), "Allgemein" for loose files
+String PropGroup(const String& file) {
+    const String group = std::filesystem::path(file).lexically_relative("Models/Props").parent_path().generic_string();
+    return group.empty() || group == "." ? String("Allgemein") : group;
+}
+
 } // namespace
 
 // ============================================================================
@@ -211,7 +217,10 @@ void MapEditor::RefreshFileLists() {
             if (!ec) prop_files_.push_back(relative);
         }
     }
-    std::sort(prop_files_.begin(), prop_files_.end());
+    // Grouped by folder, then by name
+    std::sort(prop_files_.begin(), prop_files_.end(), [](const String& a, const String& b) {
+        return std::forward_as_tuple(PropGroup(a), a) < std::forward_as_tuple(PropGroup(b), b);
+    });
 }
 
 void MapEditor::NewLevel() {
@@ -1913,9 +1922,24 @@ void MapEditor::DrawBuildPanel(Layout& l) {
                 Label(l, "Keine Modelle in Assets/Models/Props.", kDim);
                 Label(l, "GLB, GLTF, FBX oder OBJ dort ablegen.", kDim);
             }
-            for (const String& file : prop_files_) {
-                const String name = std::filesystem::path(file).stem().string();
-                if (FullButton(l, name)) AddProp(file);
+            // One foldable entry per folder below Models/Props
+            for (size_t first = 0; first < prop_files_.size();) {
+                const String group = PropGroup(prop_files_[first]);
+                size_t last = first;
+                while (last < prop_files_.size() && PropGroup(prop_files_[last]) == group) ++last;
+
+                bool open = open_prop_groups_.count(group) > 0;
+                String title = group;
+                std::replace(title.begin(), title.end(), '/', ' ');
+                if (FullButton(l, fmt::format("{} {}  ({})", open ? "-" : "+", title, last - first), open)) {
+                    open = !open;
+                    if (open) open_prop_groups_.insert(group);
+                    else open_prop_groups_.erase(group);
+                }
+                for (size_t i = first; open && i < last; ++i) {
+                    if (FullButton(l, "    " + std::filesystem::path(prop_files_[i]).stem().string())) AddProp(prop_files_[i]);
+                }
+                first = last;
             }
             break;
         }
