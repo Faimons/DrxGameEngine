@@ -62,3 +62,13 @@ Thumbs.db
 *.tga
 # Keep small test assets
 !Assets/Test/*
+
+# SHIFT: large/licensed assets stay local, only code and maps go to GitHub
+Assets/labor/
+Games/Shift/Assets/Models/
+Games/Shift/Assets/Animations/
+Games/Shift/Assets/Textures/
+Games/Shift/Assets/Audio/
+Games/Shift/Assets/UI/
+**/awp.glb
+**/first_person_ak47_animation.glb
